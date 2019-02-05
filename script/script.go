@@ -7,7 +7,7 @@
 // and lambda extensions of the language.
 //
 // Script defines the following builtins for defining Diviner
-// configurations:
+// configurations: (Question marks indicate optional arguments.)
 //
 //	discrete(v1, v2, v3...)
 //		Defines a discrete parameter that takes on the provided set
@@ -22,9 +22,22 @@
 //	maximize(metric)
 //		Defines an objective that maximizes a metric (string).
 //
-//	run_config(script, local_files)
-//		Defines a run config (diviner.RunConfig) with the provided
-//		script (string) and set of local files (list of strings).
+//	dataset(name, if_not_exist?, local_files?, script)
+//		Defines a dataset (diviner.Dataset):
+//		- name:         the name of the dataset, which must be unique;
+//		- if_not_exist: a URL that is checked for conditional execution;
+//		- local_files:  a list of local files that must be made available
+// 		                in the script's execution environment;
+//		- script:       the script that is run to produce the dataset.
+//
+//	run_config(script, local_files?, datasets?)
+//		Defines a run config (diviner.RunConfig) representing a single
+//		trial:
+//		- script:      the script that is executed for this trial;
+//		- local_files: a list of local files that must be made available
+//		               in the script's execution environment;
+//		- datasets:    a list of datasets that must be available before
+//		               the trial can proceed.
 //
 //	study(name, params, objective, run)
 //		A toplevel function that declares a named study with the provided
@@ -78,6 +91,7 @@ func Load(filename string, src interface{}) ([]diviner.Study, error) {
 		"range":      starlark.NewBuiltin("range", makeRange),
 		"minimize":   starlark.NewBuiltin("minimize", makeObjective(diviner.Minimize)),
 		"maximize":   starlark.NewBuiltin("maximize", makeObjective(diviner.Maximize)),
+		"dataset":    starlark.NewBuiltin("dataset", makeDataset),
 		"run_config": starlark.NewBuiltin("run_config", makeRunConfig),
 		"study":      starlark.NewBuiltin("study", makeStudy),
 	}
@@ -215,13 +229,15 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 
 func makeRunConfig(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var (
-		config diviner.RunConfig
-		files  = new(starlark.List)
+		config   diviner.RunConfig
+		files    = new(starlark.List)
+		datasets = new(starlark.List)
 	)
 	err := starlark.UnpackArgs(
 		"run_config", args, kwargs,
 		"script", &config.Script,
 		"local_files?", &files,
+		"datasets?", &datasets,
 	)
 	if err != nil {
 		return nil, err
@@ -234,7 +250,43 @@ func makeRunConfig(thread *starlark.Thread, _ *starlark.Builtin, args starlark.T
 		}
 		config.LocalFiles[i] = string(str)
 	}
+	if datasets.Len() > 0 {
+		config.Datasets = make([]diviner.Dataset, datasets.Len())
+	}
+	for i := range config.Datasets {
+		var ok bool
+		config.Datasets[i], ok = datasets.Index(i).(diviner.Dataset)
+		if !ok {
+			return nil, fmt.Errorf("dataset %s is not a dataset", datasets.Index(i))
+		}
+	}
 	return config, nil
+}
+
+func makeDataset(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var (
+		dataset diviner.Dataset
+		files   = new(starlark.List)
+	)
+	err := starlark.UnpackArgs(
+		"dataset", args, kwargs,
+		"name", &dataset.Name,
+		"if_not_exist?", &dataset.IfNotExist,
+		"local_files?", &files,
+		"script", &dataset.Script,
+	)
+	if err != nil {
+		return nil, err
+	}
+	dataset.LocalFiles = make([]string, files.Len())
+	for i := range dataset.LocalFiles {
+		str, ok := files.Index(i).(starlark.String)
+		if !ok {
+			return nil, fmt.Errorf("file %s is not a string", files.Index(i))
+		}
+		dataset.LocalFiles[i] = string(str)
+	}
+	return dataset, nil
 }
 
 func makeObjective(direction diviner.Direction) func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error) {

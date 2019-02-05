@@ -33,6 +33,11 @@
 //
 // - a study is a black box, an objective, and an oracle.
 //
+// Additionally, a run config may include a dataset, which is
+// a pre-processing step that's required to run the trial itself.
+// Multiple run configs may depend on the same dataset; they are
+// computed at most once for each session.
+//
 // Studies (and their associated objects) are configured by a
 // configuration script written in the Starlark configuration
 // language [2]. Details of the Starlark builtins provided to create
@@ -47,10 +52,22 @@
 //	# training and evaluation for the model.
 //	model_files = ["neural_network.py", "utils.py"]
 //
+//	# create_dataset returns a dataset that's required to
+//	# run the model.
+//	def create_dataset(region):
+//	    url = "s3://grail-datasets/regions%s" % region
+//	    return dataset(
+//	        name="region%s" % region,
+//	        if_not_exist=url,
+//	        local_files=["make_dataset.py"],
+//	        script="makedataset.py %s %s" % (region, url),
+//	    )
+//
 //	# run_model returns a run configuration for a set of
 //	# parameter values.
 //	def run_model(pvalues):
 //	  return run_config(
+//	    datasets = [create_dataset(pvalues["region"])],
 //	    local_files=model_files,
 //	    script="""
 //	      python neural_network.py \
@@ -74,6 +91,7 @@
 //	  params={
 //	    "batch_size": discrete(16, 32, 64, 128),
 //	    "optimizer": discrete("adam", "sgd"),
+//	    "region": discrete("chr1", "chr2"),
 //	  },
 //	  run=run_model,
 //	)
@@ -112,6 +130,7 @@ package main
 
 import (
 	"context"
+	"expvar"
 	"flag"
 	"fmt"
 	"net/http"
@@ -237,6 +256,7 @@ func run(study diviner.Study, args []string) {
 
 	db := divinerdb.New(*dir)
 	runner := runner.New(study, db, b, *parallelism)
+	expvar.Publish("diviner", expvar.Func(func() interface{} { return runner.Counters() }))
 	http.Handle("/status", runner)
 	done, err := runner.Do(ctx, *ntrials)
 	if err != nil {

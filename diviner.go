@@ -122,6 +122,41 @@ type Oracle interface {
 	// with the oracle.
 }
 
+// A Dataset describes a preprocessing step that's required
+// by a run. It may be shared among multiple runs.
+type Dataset struct {
+	// Name is a unique name describing the dataset. Uniqueness is
+	// required: diviner only runs one dataset for each named dataset,
+	Name string
+	// IfNotExist may contain a URL which is checked for existence
+	// before running the script that produces this dataset. It is
+	// assumed the dataset already exists if the URL exists.
+	IfNotExist string
+	// LocalFiles is a set of files (local to where diviner is run)
+	// that should be made available in the script's environment.
+	// These files are copied into the script's working directory,
+	// retaining their basenames. (Thus the set of basenames in
+	// the list should not collide.)
+	LocalFiles []string
+	// Script is a Bash script that is run to produce this dataset.
+	Script string
+}
+
+// String returns a textual description of the dataset.
+func (d Dataset) String() string { return fmt.Sprintf("dataset(%s)", d.Name) }
+
+// Type implements starlark.Value.
+func (Dataset) Type() string { return "dataset" }
+
+// Freeze implements starlark.Value.
+func (Dataset) Freeze() {}
+
+// Truth implements starlark.Value.
+func (Dataset) Truth() starlark.Bool { return true }
+
+// Hash implements starlark.Value.
+func (Dataset) Hash() (uint32, error) { return 0, errNotHashable }
+
 // A RunConfig describes how to perform a single run of a black box
 // with a set of parameter values. Runs are defined by a bash script
 // and a set of files that must be included in its run environment.
@@ -138,6 +173,9 @@ type Oracle interface {
 //
 // TODO(marius): allow interpreters other than Bash.
 type RunConfig struct {
+	// Datasets contains the set of datasets required by this
+	// run.
+	Datasets []Dataset
 	// Script is a script that should be interpreted by Bash.
 	Script string
 	// LocalFiles is a set of files (local to where diviner is run)

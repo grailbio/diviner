@@ -8,30 +8,25 @@
 package runner
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"errors"
-	"expvar"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"text/tabwriter"
 	"time"
 
 	"github.com/grailbio/base/log"
-	"github.com/grailbio/base/retry"
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/diviner"
 	"github.com/grailbio/diviner/divinerdb"
-	"golang.org/x/time/rate"
 )
+
+// IdleTime is the amount of time workers are allowed to remain idle
+// before being stopped.
+const idleTime = time.Minute
 
 // A Runner is responsible for creating a cluster of machines and running
 // trials on the cluster.
@@ -43,15 +38,27 @@ type Runner struct {
 	b           *bigmachine.B
 	parallelism int
 
-	mu   sync.Mutex
-	runs []*run
+	requestc chan chan<- *worker
+
+	mu       sync.Mutex
+	counters map[string]int
+	runs     []*run
+	datasets map[string]*dataset
 }
 
 // New returns a new runner that will perform trials for the provided study,
 // recording its results to the provided db, using the provided bigmachine.B
-// to create a cluster of machines of at most the size of the parallelism argument.
+// to create a cluster of machines of at most hte size of the parallelism argument.
 func New(study diviner.Study, db *divinerdb.DB, b *bigmachine.B, parallelism int) *Runner {
-	return &Runner{study: study, db: db, b: b, parallelism: parallelism}
+	return &Runner{
+		study:       study,
+		db:          db,
+		b:           b,
+		parallelism: parallelism,
+		counters:    make(map[string]int),
+		requestc:    make(chan chan<- *worker),
+		datasets:    make(map[string]*dataset),
+	}
 }
 
 // ServeHTTP implements http.Handler, providing a simple status page used
@@ -104,12 +111,23 @@ func (r *Runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	tw.Flush()
 }
 
+// Counters returns a set of runtime counters from this runner's Do loop.
+func (r *Runner) Counters() map[string]int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	counters := make(map[string]int)
+	for k, v := range r.counters {
+		counters[k] = v
+	}
+	return counters
+}
+
 // Do performs at most ntrials of a study. If ntrials is 0, then Do performs
 // all trials returned by the study's oracle. Results are reported to the
 // database as they are returned, and the runner's status page is updated
 // continually with the latest available run metrics.
 //
-// Do does not perform retries for failed trials. Do cannot be invoked
+// Do does not perform retries for failed trials. Do should not be invoked
 // concurrently.
 //
 // BUG(marius): the runner should re-create failed machines.
@@ -142,300 +160,126 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 		r.runs = nil
 		r.mu.Unlock()
 	}()
-	var (
-		todoc       = make(chan *run, len(runs))
-		donec       = make(chan *run)
-		doneworkerc = make(chan struct{})
-	)
+
+	donec := make(chan *run)
 	for _, run := range runs {
-		todoc <- run
-	}
-	close(todoc)
-	log.Printf("starting %d runs", len(runs))
-	nworker := r.parallelism
-	if nworker == 0 || nworker > len(runs) {
-		nworker = len(runs)
-	}
-	for i := 0; i < nworker; i++ {
+		run := run
 		go func() {
-			err := worker(ctx, r.b, r.study, todoc, donec)
-			if err != nil {
-				log.Error.Printf("worker failure: %v", err)
-			}
-			doneworkerc <- struct{}{}
+			run.Do(ctx, r)
+			donec <- run
 		}()
 	}
 
 	var (
-		workersVar = expvar.NewInt("workers")
-		doneVar    = expvar.NewInt("done")
-		failedVar  = expvar.NewInt("failed")
-	)
-	workersVar.Set(int64(len(runs)))
-	expvar.Publish("queued", expvar.Func(func() interface{} {
-		return len(todoc)
-	}))
-	expvar.Publish("processing", expvar.Func(func() interface{} {
-		return len(runs) - int(doneVar.Value()) - int(failedVar.Value()) - len(todoc)
-	}))
+		requests []chan<- *worker
+		idle     []*worker
+		workerc  = make(chan *worker)
+		tick     = time.NewTicker(10 * time.Second)
 
-	var needmore bool
-runloop:
-	for {
+		nworker, ndone, nfail int
+	)
+	updateCounters := func() {
+		r.mu.Lock()
+		r.counters["nworker"] = nworker
+		r.counters["ndone"] = ndone
+		r.counters["nfail"] = nfail
+		r.mu.Unlock()
+	}
+	for ndone < len(runs) {
+		updateCounters()
 		select {
 		case <-ctx.Done():
 			return false, ctx.Err()
-		case run := <-donec:
-			status, message := run.Status()
-			if message != "" {
-				log.Printf("run %s: %s %s", run, status, message)
-			} else {
-				log.Printf("run %s: %s", run, status)
+		case <-tick.C:
+			for len(idle) > 0 && time.Since(idle[0].IdleTime) > idleTime {
+				var w *worker
+				w, idle = idle[0], idle[1:]
+				w.Cancel()
+				nworker--
 			}
-			switch status {
+		case req := <-r.requestc:
+			requests = append(requests, req)
+			if r.parallelism > 0 && r.parallelism <= nworker {
+				break
+			}
+			nworker++
+			go startWorker(ctx, r.b, workerc)
+		case w := <-workerc:
+			if err := w.Err(); err != nil {
+				// TODO(marius): allocate a new worker to replace this one.
+				nworker--
+				log.Error.Printf("worker %s error: %v", w, err)
+				break
+			}
+			if len(requests) > 0 {
+				req := requests[0]
+				requests = requests[1:]
+				req <- w
+				break
+			}
+			// Otherwise we put it on a watch list. We don't reap the instance
+			// right away because of the race between dataset completion and
+			// runs starting.
+			w.IdleTime = time.Now()
+			idle = append(idle, w)
+		case run := <-donec:
+			s, m := run.Status()
+			log.Printf("run %s: %s %s", run, s, m)
+			ndone++
+			switch status, message := run.Status(); status {
 			case statusWaiting, statusRunning:
-				panic(status)
+				log.Error.Printf("run %s returned with incomplete status %s", run, status)
 			case statusOk:
-				metrics := run.Metrics()
-				if len(metrics) == 0 {
-					// TODO: also verify that all metrics have been reported
-					log.Error.Printf("run %s reported no metrics", run)
-					needmore = false
-				}
 				if err := r.db.Report(r.study, diviner.Trial{
 					Values:  run.Values,
-					Metrics: metrics,
+					Metrics: run.Metrics(),
 				}); err != nil {
 					log.Printf("error reporting metrics for run %s: %v", run, err)
-					needmore = false
+					nfail++
 				}
-				doneVar.Add(1)
 			case statusErr:
-				failedVar.Add(1)
-			}
-		case <-doneworkerc:
-			workersVar.Add(-1)
-			if workersVar.Value() == 0 {
-				break runloop
+				nfail++
+				log.Error.Printf("run %s error: %v", run, message)
 			}
 		}
 	}
-	log.Printf("runs complete: total=%d done=%d failed=%d", len(runs), doneVar.Value(), failedVar.Value())
-	return !needmore && (ntrials == 0 || len(runs) < ntrials) && len(todoc) == 0, nil
+	for _, w := range idle {
+		nworker--
+		w.Cancel()
+	}
+	updateCounters()
+	return nfail == 0 && (ntrials == 0 || len(runs) < ntrials), nil
 }
 
-var (
-	machineRetry = retry.Jitter(retry.Backoff(30*time.Second, 5*time.Minute, 1.5), 0.5)
-	machineLimit = rate.NewLimiter(rate.Limit(0.5), 3)
-	allocating   = expvar.NewInt("allocating")
-	allocated    = expvar.NewInt("allocated")
-)
-
-// Worker starts a worker machine, processing runs as requested by
-// the main loop. Worker returns when the todo channel is closed or
-// if the machine fails.
-func worker(ctx context.Context, b *bigmachine.B, study diviner.Study, enterc <-chan *run, returnc chan<- *run) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	start := time.Now()
-	var m *bigmachine.Machine
-	// First try to allocate a machine. We keep a jittered retry schedule so that
-	// we have a chance to get through the various rate limits.
-	allocating.Add(1)
-	defer func() {
-		if m == nil {
-			allocating.Add(-1)
-		}
-	}()
-	for try := 0; ; try++ {
-		// TODO(marius): distinguish between true allocation errors
-		// and others that may occur.
-		if err := machineLimit.Wait(ctx); err != nil {
-			return err
-		}
-		machines, err := b.Start(ctx, 1, bigmachine.Services{
-			"Cmd": &commandService{},
-		})
-		if err == nil && len(machines) == 0 {
-			err = errors.New("no machines allocated")
-		} else if err == nil {
-			m = machines[0]
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(5 * time.Minute):
-				err = errors.New("timeout while waiting for machine to start")
-			case <-m.Wait(bigmachine.Running):
-				if m.State() != bigmachine.Running {
-					err = fmt.Errorf("machine failed to start: %v", m.Err())
-				}
-			}
-		}
-		if err == nil {
-			break
-		}
-		// HACK: this should be propagated as a semantic error annotation.
-		if !strings.Contains(err.Error(), "InstanceLimitExceeded") {
-			log.Error.Printf("failed to allocate machine: %v", err)
-		}
-		if err := retry.Wait(ctx, machineRetry, try); err != nil {
-			return err
-		}
+// Allocate allocates a new worker and returns it. Workers must
+// be returned after they are done by calling w.Return.
+func (r *Runner) allocate(ctx context.Context) (*worker, error) {
+	replyc := make(chan *worker)
+	select {
+	case r.requestc <- replyc:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	defer m.Cancel()
-	allocating.Add(-1)
-	allocated.Add(1)
-	log.Printf("allocated machine %s in %s", m.Addr, time.Since(start))
-
-runloop:
-	// Process trials.
-	for run := range enterc {
-		start := time.Now()
-
-		// For each run, we reset the "scratch" space used to store command
-		// input and output, upload local files, and then run the actual
-		// command, while monitoring its output.
-		if err := m.Call(ctx, "Cmd.Reset", struct{}{}, nil); err != nil {
-			run.Errorf("failed to reset scratch space: %v", err)
-			returnc <- run
-			continue
-		}
-
-		for _, path := range run.Config.LocalFiles {
-			file := fileLiteral{Name: path}
-			var err error
-			file.Contents, err = ioutil.ReadFile(path)
-			if err != nil {
-				run.Errorf("failed to read local file %s: %v", path, err)
-				returnc <- run
-				continue runloop
-			}
-			if err := m.Call(ctx, "Cmd.WriteFile", file, nil); err != nil {
-				run.Errorf("failed to upload file %s: %v", path, err)
-				returnc <- run
-				continue runloop
-			}
-		}
-
-		var out io.ReadCloser
-		// TODO(marius): allow bigmachine to run under the default user.
-		script := `set -ex; su - ubuntu; export HOME=/home/ubuntu; ` + run.Config.Script
-		if err := m.Call(ctx, "Cmd.Run", []string{"bash", "-c", script}, &out); err != nil {
-			run.Errorf("failed to run script: %v", err)
-			returnc <- run
-			continue runloop
-		}
-
-		run.SetStatus(statusRunning, "")
-
-		// Now that it's running, we tee the output of the script and
-		// update its status. This allows scripts to, for example, output
-		// progress bars or other things pertinent for monitoring. This
-		// output is also teed to a local file for output.
-		//
-		// TODO(marius): make the local path configurable via the run.
-		r, w := io.Pipe()
-		writers := []io.Writer{w}
-		f, err := os.Create(run.String())
-		if err != nil {
-			log.Error.Printf("failed to create log file for %s: %v", run, err)
-		} else {
-			writers = append(writers, f)
-		}
-		donec := make(chan struct{})
-		go func() {
-			scan := bufio.NewScanner(r)
-			// In theory, Tensorflow's Progbar should display each update as a
-			// new line when not outputting to a TTY, but its TTY detection
-			// seems broken.
-			scan.Split(scanProgress)
-			for scan.Scan() {
-				line := scan.Text()
-				// TODO: make the prefix configurable, or perhaps even
-				// different ways of communicating metrics.
-				if strings.HasPrefix(line, "METRICS: ") {
-					metrics, err := parseMetrics(strings.TrimPrefix(line, "METRICS: "))
-					if err != nil {
-						log.Error.Printf("error parsing metrics from run %s: %v", run, err)
-					} else {
-						run.Report(metrics)
-					}
-				} else {
-					run.SetStatus(statusRunning, line)
-				}
-			}
-			// (Ignore errors.)
-			close(donec)
-		}()
-		_, err = io.Copy(io.MultiWriter(writers...), out)
-		if e := out.Close(); err != nil && e != nil {
-			err = e
-		}
-		if f != nil {
-			if err := f.Close(); err != nil {
-				log.Error.Printf("failed to close %s: %v", f.Name(), err)
-			}
-		}
-		// Close the pipe and wait for the final status to be set so we don't
-		// race for setting state.
-		w.Close()
-		select {
-		case <-donec:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		elapsed := time.Since(start)
-		if err == nil {
-			run.SetStatus(statusOk, elapsed.String())
-		} else {
-			run.Errorf("run failed after %s: %v", elapsed, err)
-		}
-		returnc <- run
+	select {
+	case w := <-replyc:
+		return w, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return nil
 }
 
-// ScanProgress scans lines of output from a trial script, anticipating
-// "progress bar" style output, like that used in Tensorflow's progbar.
-func scanProgress(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
+// Dataset returns a named dataset as managed by this runner.
+// If this is the first time the dataset is encountered, then the
+// runner also begins dataset processing.
+func (r *Runner) dataset(ctx context.Context, dataset diviner.Dataset) *dataset {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.datasets[dataset.Name]
+	if ok {
+		return d
 	}
-	var (
-		ni = bytes.IndexByte(data, '\n')
-		ri = bytes.IndexByte(data, '\r')
-	)
-	if ni >= 0 && (ri < 0 || ni < ri) {
-		return ni + 1, data[:ni], nil
-	}
-	if ri >= 0 {
-		data = data[:ri]
-		// Drop '\b's inserted by the progbar.
-		for len(data) > 0 && data[len(data)-1] == '\b' {
-			data = data[:len(data)-1]
-		}
-		return ri + 1, data, nil
-	}
-	if atEOF {
-		return len(data), data, nil
-	}
-	// Need more data.
-	return 0, nil, nil
-}
-
-func parseMetrics(line string) (diviner.Metrics, error) {
-	elems := strings.Split(line, ",")
-	metrics := make(diviner.Metrics)
-	for _, elem := range elems {
-		parts := strings.SplitN(elem, "=", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("bad metric %s", elem)
-		}
-		var err error
-		metrics[parts[0]], err = strconv.ParseFloat(parts[1], 64)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing metric %s: %v", parts[1], err)
-		}
-	}
-	return metrics, nil
+	d = newDataset(dataset)
+	r.datasets[d.Name] = d
+	go d.Do(ctx, r)
+	return d
 }

@@ -52,6 +52,16 @@ func (p Params) Sorted() []NamedParam {
 // of metrics may include others for diagnostic purposes.
 type Metrics map[string]float64
 
+// Merge merges metrics n into m; values in n overwrite values in m.
+func (m *Metrics) Merge(n Metrics) {
+	if *m == nil {
+		*m = make(Metrics)
+	}
+	for k, v := range n {
+		(*m)[k] = v
+	}
+}
+
 // A Trial is the result of a single run of a black box.
 type Trial struct {
 	// Values is the set of parameter values used for the run.

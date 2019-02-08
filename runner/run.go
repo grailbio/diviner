@@ -193,11 +193,11 @@ func (r *run) String() string {
 	return fmt.Sprintf("study=%s,%s", r.Study.Name, r.Values)
 }
 
-// Report updates the run's metrics to those provided.
+// Report merges the provided metrics into the current run metrics.
 func (r *run) report(metrics diviner.Metrics) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.metrics = metrics
+	r.metrics.Merge(metrics)
 }
 
 // Metrics returns the last reported metrics for this run.

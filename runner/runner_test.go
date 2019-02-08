@@ -50,7 +50,8 @@ func TestRunner(t *testing.T) {
 						# Dataset should have been produced.
 						test -f %s || exit 1
 						echo hello world
-						echo METRICS: paramvalue=%s
+						echo METRICS: paramvalue=1
+						echo METRICS: another=3,paramvalue=%s
 					`, datasetFile, values["param"]),
 			}
 		},
@@ -80,7 +81,7 @@ func TestRunner(t *testing.T) {
 	for i := range expect {
 		expect[i] = diviner.Trial{
 			Values:  diviner.Values{"param": diviner.Int(i)},
-			Metrics: diviner.Metrics{"paramvalue": float64(i)},
+			Metrics: diviner.Metrics{"paramvalue": float64(i), "another": 3},
 		}
 	}
 	if got, want := trials, expect; !reflect.DeepEqual(got, want) {

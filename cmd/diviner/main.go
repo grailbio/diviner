@@ -217,11 +217,13 @@ func run(study diviner.Study, args []string) {
 	ctx := context.Background()
 	// TODO(marius): don't hardcode this; specify it in the study.
 	system := &ec2system.System{
-		AMI:          "ami-09294617227072dcc",
-		InstanceType: "p3.2xlarge",
-		Dataspace:    800,
-		OnDemand:     true,
-		Flavor:       ec2system.Ubuntu,
+		AMI:             "ami-09294617227072dcc",
+		InstanceProfile: "arn:aws:iam::619867110810:instance-profile/adhoc",
+		InstanceType:    "p3.2xlarge",
+		Diskspace:       300,
+		Dataspace:       800,
+		OnDemand:        true,
+		Flavor:          ec2system.Ubuntu,
 	}
 	b := bigmachine.Start(system)
 	if study.Oracle == nil {

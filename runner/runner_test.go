@@ -91,6 +91,7 @@ func TestRunner(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 
+	r.Cancel()
 	// Make sure the machines are stopped.
 	for _, m := range b.Machines() {
 		if !eventually(func() bool { return m.Err() != nil }) {

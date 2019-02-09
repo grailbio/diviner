@@ -20,6 +20,8 @@ import (
 	"github.com/grailbio/diviner"
 )
 
+const timeLayout = "20060102.150405"
+
 // Status describes the current status of a run.
 type status int
 
@@ -69,6 +71,10 @@ type run struct {
 
 	// Config is the run config for this trial.
 	Config diviner.RunConfig
+
+	// ID is the ID of the run; assigned sequentially for each runner
+	// instance.
+	ID int
 
 	mu            sync.Mutex
 	status        status
@@ -131,10 +137,16 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 	// TODO(marius): make the local path configurable via the run.
 	read, write := io.Pipe()
 	writers := []io.Writer{write}
-	f, err := os.Create(r.String())
+
+	// Create a path name based on the study and current timestamp.
+	// We include the parameters at the top of the log.
+	path := fmt.Sprintf("%s.%s.run%04d",
+		r.Study.Name, runner.StartTime().Local().Format(timeLayout), r.ID)
+	f, err := os.Create(path)
 	if err != nil {
 		log.Error.Printf("failed to create log file for %s: %v", r, err)
 	} else {
+		fmt.Fprintln(f, "run:", r)
 		writers = append(writers, f)
 	}
 	donec := make(chan struct{})
@@ -273,6 +285,9 @@ func parseMetrics(line string) (diviner.Metrics, error) {
 	elems := strings.Split(line, ",")
 	metrics := make(diviner.Metrics)
 	for _, elem := range elems {
+		if elem == "" {
+			continue
+		}
 		parts := strings.SplitN(elem, "=", 2)
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("bad metric %s", elem)

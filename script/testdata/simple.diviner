@@ -7,11 +7,12 @@ def run_simple_model(values):
 
 for (name, objective) in [("study_1", minimize("x")), ("study_2", maximize("z"))]:
     study(
-        name=name, 
+        name=name,
         objective=objective,
         params={
             "learning_rate": discrete(0.1, 0.2, 0.3),
             "dropout": discrete(0.5, 0.8),
         },
         run=run_simple_model,
+        oracle=skopt(acq_func="EI"),
     )

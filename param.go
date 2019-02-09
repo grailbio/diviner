@@ -93,25 +93,37 @@ func (*Discrete) Hash() (uint32, error) { return 0, errNotHashable }
 // Range is a parameter that is defined over a range of
 // real numbers.
 type Range struct {
-	start, end float64
+	Start, End Value
 }
 
 // NewRange returns a range parameter representing the
 // range of values [start, end).
-func NewRange(start, end float64) *Range {
-	if end < start {
-		panic("invalid range")
+func NewRange(start, end Value) *Range {
+	if start.Kind() != end.Kind() {
+		panic("mismatched kinds in range")
 	}
-	return &Range{start: start, end: end}
+	switch start.Kind() {
+	case Integer:
+		if end.Int() < start.Int() {
+			panic("invalid range")
+		}
+	case Real:
+		if end.Float() < start.Float() {
+			panic("invalid range")
+		}
+	default:
+		panic(fmt.Sprintf("cannot form a range from values of kind %s", start.Kind()))
+	}
+	return &Range{Start: start, End: end}
 }
 
 // String returns a description of this range parameter.
 func (r *Range) String() string {
-	return fmt.Sprintf("range(%f, %f)", r.start, r.end)
+	return fmt.Sprintf("range(%s, %s)", r.Start, r.End)
 }
 
 // Kind returns Real.
-func (*Range) Kind() Kind { return Real }
+func (r *Range) Kind() Kind { return r.Start.Kind() }
 
 // Values returns nil: Ranges represent infinite sets of values.
 func (r *Range) Values() []Value { return nil }
@@ -119,7 +131,14 @@ func (r *Range) Values() []Value { return nil }
 // Sample draws a random sample from within the range represented by
 // this parameter.
 func (r *Range) Sample(rnd *rand.Rand) Value {
-	return Float(r.start + rnd.Float64()*(r.end-r.start))
+	switch r.Kind() {
+	case Integer:
+		return Int(r.Start.Int() + rnd.Int63n(r.End.Int()-r.Start.Int()))
+	case Real:
+		return Float(r.Start.Float() + rnd.Float64()*(r.End.Float()-r.Start.Float()))
+	default:
+		panic(r)
+	}
 }
 
 // Type implements starlark.Value.

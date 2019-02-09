@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/grailbio/diviner"
+	"github.com/grailbio/diviner/oracle"
 	"github.com/grailbio/diviner/script"
 )
 
@@ -38,6 +39,9 @@ func TestScript(t *testing.T) {
 		"dropout":       diviner.NewDiscrete(diviner.Float(0.5), diviner.Float(0.8)),
 	}
 	if got, want := studies[0].Params, params; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := studies[0].Oracle, (&oracle.Skopt{AcquisitionFunc: "EI"}); !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 

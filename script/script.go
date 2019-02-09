@@ -7,14 +7,14 @@
 // and lambda extensions of the language.
 //
 // Script defines the following builtins for defining Diviner
-// configurations: (Question marks indicate optional arguments.)
+// configurations:  marks indicate optional arguments.)
 //
 //	discrete(v1, v2, v3...)
 //		Defines a discrete parameter that takes on the provided set
 //		set of values (types string, float, or int).
 //
 //	range(beg, end)
-//		Defines a range parameter with the given range.
+//		Defines a range parameter with the given range. (Integers or floats.)
 //
 //	minimize(metric)
 //		Defines an objective that minimizes a metric (string).
@@ -39,7 +39,7 @@
 //		- datasets:    a list of datasets that must be available before
 //		               the trial can proceed.
 //
-//	study(name, params, objective, run)
+//	study(name, params, objective, run, oracle?)
 //		A toplevel function that declares a named study with the provided
 //		parameters, runner, and objectives.
 //		- name:      a string specifying the name of the study;
@@ -48,6 +48,25 @@
 //		             to be optimized;
 //		- run:       a function that returns a run_config for a set
 //		             of parameter values.
+//		- oracle:    the oracle to use (grid search by default)
+//
+//	grid_search
+//		The grid search oracle
+//
+//	skopt(base_estimator?, n_initial_points?, acq_func?, acq_optimizer?)
+//		A Bayesian optimization oracle based on skopt. The arguments
+//		are as in skopt.Optimizer, documented at
+//		https://scikit-optimize.github.io/optimizer/index.html#skopt.optimizer.Optimizer:
+//		- base_estimator:   the base estimator to be used, one of
+//		                    "GP", "RF", "ET", "GBRT" (default "GP");
+//		- n_initial_points: number of evaluations to perform before estimating
+//		                    using the above estimator (default 10);
+//		- acq_func:         the acquisition function to use for sampling
+//		                    new points, one of "LCB", "EI", "PI", or
+//		                    "gp_hedge" (default "gp_hedge");
+//		- acq_optimizer:    the optimizer used to minimize the acquisitino function,
+//		                    one of "sampling", "lgbfs" (by default it is automatically
+//		                    selected).
 //
 // Diviner configs must include one or more studies as toplevel declarations.
 // Global starlark objects are frozen after initial evaluation to prevent functions
@@ -62,6 +81,7 @@ import (
 
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/diviner"
+	"github.com/grailbio/diviner/oracle"
 	"go.starlark.net/resolve"
 	"go.starlark.net/starlark"
 )
@@ -87,13 +107,15 @@ func Load(filename string, src interface{}) ([]diviner.Study, error) {
 	var studies []diviner.Study
 	thread.SetLocal("studies", &studies)
 	builtins := starlark.StringDict{
-		"discrete":   starlark.NewBuiltin("discrete", makeDiscrete),
-		"range":      starlark.NewBuiltin("range", makeRange),
-		"minimize":   starlark.NewBuiltin("minimize", makeObjective(diviner.Minimize)),
-		"maximize":   starlark.NewBuiltin("maximize", makeObjective(diviner.Maximize)),
-		"dataset":    starlark.NewBuiltin("dataset", makeDataset),
-		"run_config": starlark.NewBuiltin("run_config", makeRunConfig),
-		"study":      starlark.NewBuiltin("study", makeStudy),
+		"discrete":    starlark.NewBuiltin("discrete", makeDiscrete),
+		"range":       starlark.NewBuiltin("range", makeRange),
+		"minimize":    starlark.NewBuiltin("minimize", makeObjective(diviner.Minimize)),
+		"maximize":    starlark.NewBuiltin("maximize", makeObjective(diviner.Maximize)),
+		"dataset":     starlark.NewBuiltin("dataset", makeDataset),
+		"run_config":  starlark.NewBuiltin("run_config", makeRunConfig),
+		"study":       starlark.NewBuiltin("study", makeStudy),
+		"grid_search": &oracleValue{oracle.GridSearch},
+		"skopt":       starlark.NewBuiltin("skopt", makeSkopt),
 	}
 	globals, err := starlark.ExecFile(thread, filename, src, builtins)
 	// Freeze everything now so that if we try to mutate global state
@@ -106,6 +128,18 @@ func Load(filename string, src interface{}) ([]diviner.Study, error) {
 	}
 	return studies, err
 }
+
+type oracleValue struct{ diviner.Oracle }
+
+func (o *oracleValue) String() string { return fmt.Sprint(o.Oracle) }
+
+func (*oracleValue) Type() string { return "oracle" }
+
+func (*oracleValue) Freeze() {}
+
+func (*oracleValue) Truth() starlark.Bool { return true }
+
+func (*oracleValue) Hash() (uint32, error) { return 0, errors.New("oracles not hashable") }
 
 func makeDiscrete(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	if len(kwargs) != 0 {
@@ -141,15 +175,30 @@ func makeRange(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 	if len(args) != 2 {
 		return nil, errors.New("range requires two arguments")
 	}
-	beg, ok := coerceToFloat(args[0])
-	if !ok {
-		return nil, fmt.Errorf("argument %s (%s) is not a valid diviner float", args[0], args[0].Type())
+	switch beg := args[0].(type) {
+	case starlark.Int:
+		beg64, ok := beg.Int64()
+		if !ok {
+			return nil, fmt.Errorf("argument %s overflows int64", beg)
+		}
+		end, ok := args[1].(starlark.Int)
+		if !ok {
+			return nil, fmt.Errorf("argument mismatch: %s is int, %s is %s", beg, args[1], args[1].Type())
+		}
+		end64, ok := end.Int64()
+		if !ok {
+			return nil, fmt.Errorf("argument %s overflows int64", end)
+		}
+		return diviner.NewRange(diviner.Int(beg64), diviner.Int(end64)), nil
+	case starlark.Float:
+		end, ok := args[1].(starlark.Float)
+		if !ok {
+			return nil, fmt.Errorf("argument mismatch: %s is float, %s is %s", beg, args[1], args[1].Type())
+		}
+		return diviner.NewRange(diviner.Float(beg), diviner.Float(end)), nil
+	default:
+		return nil, fmt.Errorf("arguments %s, %s (types %s, %s) invalid for range", args[0], args[1], args[0].Type(), args[1].Type())
 	}
-	end, ok := coerceToFloat(args[1])
-	if !ok {
-		return nil, fmt.Errorf("argument %s (%s) is not a valid diviner float", args[1], args[1].Type())
-	}
-	return diviner.NewRange(beg, end), nil
 }
 
 func coerceToFloat(v starlark.Value) (float64, bool) {
@@ -170,6 +219,7 @@ func coerceToFloat(v starlark.Value) (float64, bool) {
 func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var (
 		study  diviner.Study
+		oracle = new(oracleValue)
 		params = new(starlark.Dict)
 		runner = new(starlark.Function)
 	)
@@ -179,10 +229,12 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 		"params", &params,
 		"run", &runner,
 		"objective", &study.Objective,
+		"oracle?", &oracle,
 	)
 	if err != nil {
 		return nil, err
 	}
+	study.Oracle = oracle.Oracle
 	study.Params = make(diviner.Params)
 	for _, tup := range params.Items() {
 		keystr, ok := tup.Index(0).(starlark.String)
@@ -295,4 +347,15 @@ func makeObjective(direction diviner.Direction) func(*starlark.Thread, *starlark
 		err := starlark.UnpackArgs(direction.String(), args, kwargs, "metric", &o.Metric)
 		return o, err
 	}
+}
+
+func makeSkopt(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	skopt := new(oracle.Skopt)
+	return &oracleValue{skopt}, starlark.UnpackArgs(
+		"skopt", args, kwargs,
+		"base_estimator?", &skopt.BaseEstimator,
+		"n_initial_points?", &skopt.NumInitialPoints,
+		"acq_func?", &skopt.AcquisitionFunc,
+		"acq_optimizer?", &skopt.AcquisitionOptimizer,
+	)
 }

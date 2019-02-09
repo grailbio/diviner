@@ -1,0 +1,21 @@
+
+
+def run_toy(params):
+    return run_config(
+        script="""
+            python <<EOF
+import numpy as np
+y = np.sin(5 * %(x)f) * (1 - np.tanh(%(x)f ** 2)) + np.random.randn() * 0.2
+print("METRICS: y="+str(y))
+EOF
+        """ % params,
+    )
+    return
+
+study(
+    name="toy",
+    params={"x": range(-2.0, 2.0)},
+    objective=minimize("y"),
+    oracle=skopt(),
+    run=run_toy,
+)

@@ -40,10 +40,19 @@ type Runner struct {
 
 	requestc chan chan<- *worker
 
+	// Time is the timestamp of runner.
+	time time.Time
+
+	// Idle maintains an idle list of workers, which may be reused
+	// across invocations.
+	idle []*worker
+
 	mu       sync.Mutex
 	counters map[string]int
 	runs     []*run
 	datasets map[string]*dataset
+
+	nrun int
 }
 
 // New returns a new runner that will perform trials for the provided study,
@@ -55,10 +64,16 @@ func New(study diviner.Study, db *divinerdb.DB, b *bigmachine.B, parallelism int
 		db:          db,
 		b:           b,
 		parallelism: parallelism,
+		time:        time.Now(),
 		counters:    make(map[string]int),
 		requestc:    make(chan chan<- *worker),
 		datasets:    make(map[string]*dataset),
 	}
+}
+
+// StartTime returns the time that the runner was created.
+func (r *Runner) StartTime() time.Time {
+	return r.time
 }
 
 // ServeHTTP implements http.Handler, providing a simple status page used
@@ -71,20 +86,23 @@ func (r *Runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	sort.Strings(sorted)
 	var tw tabwriter.Writer
 	tw.Init(w, 4, 4, 1, ' ', 0)
+	io.WriteString(&tw, "id\t")
 	io.WriteString(&tw, strings.Join(sorted, "\t"))
 	fmt.Fprintln(&tw, "\tmetrics\tstatus")
 
-	// Runs are just displayed in the order they were defined.
-	row := make([]string, len(sorted)+3)
+	// TODO(marius): allow the user to pass in sort arguments, so that
+	// the status page can serve as a scoreboard.
+	row := make([]string, len(sorted)+4)
 	r.mu.Lock()
 	runs := r.runs
 	r.mu.Unlock()
 	for _, run := range runs {
+		row[0] = fmt.Sprint(run.ID)
 		for i, key := range sorted {
 			if v, ok := run.Values[key]; ok {
-				row[i] = v.String()
+				row[i+1] = v.String()
 			} else {
-				row[i] = "NA"
+				row[i+1] = "NA"
 			}
 		}
 		status, message := run.Status()
@@ -122,13 +140,14 @@ func (r *Runner) Counters() map[string]int {
 	return counters
 }
 
-// Do performs at most ntrials of a study. If ntrials is 0, then Do performs
-// all trials returned by the study's oracle. Results are reported to the
-// database as they are returned, and the runner's status page is updated
-// continually with the latest available run metrics.
+// Do performs a single round of a study; at most ntrials. If
+// ntrials is 0, then Do performs all trials returned by the study's
+// oracle. Results are reported to the database as they are returned,
+// and the runner's status page is updated continually with the
+// latest available run metrics.
 //
-// Do does not perform retries for failed trials. Do should not be invoked
-// concurrently.
+// Do does not perform retries for failed trials. Do should not be
+// invoked concurrently.
 //
 // BUG(marius): the runner should re-create failed machines.
 func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
@@ -151,6 +170,8 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 		runs[i].Study = r.study
 		runs[i].Values = values[i]
 		runs[i].Config = r.study.Run(values[i])
+		runs[i].ID = r.nrun
+		r.nrun++
 	}
 	r.mu.Lock()
 	r.runs = runs
@@ -166,24 +187,39 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 		run := run
 		go func() {
 			run.Do(ctx, r)
-			donec <- run
+			select {
+			case <-ctx.Done():
+			case donec <- run:
+			}
 		}()
 	}
 
 	var (
-		requests []chan<- *worker
-		idle     []*worker
-		workerc  = make(chan *worker)
-		tick     = time.NewTicker(10 * time.Second)
-
-		nworker, ndone, nfail int
+		requests               []chan<- *worker
+		workerc                = make(chan *worker)
+		tick                   = time.NewTicker(10 * time.Second)
+		nworker                = len(r.idle)
+		ndone, nfail, nstarted int
 	)
+	r.mu.Lock()
+	snapshot := make(map[string]int)
+	for k, v := range r.counters {
+		snapshot[k] = v
+	}
+	r.mu.Unlock()
 	updateCounters := func() {
 		r.mu.Lock()
 		r.counters["nworker"] = nworker
-		r.counters["ndone"] = ndone
-		r.counters["nfail"] = nfail
+		r.counters["ndone"] = snapshot["ndone"] + ndone
+		r.counters["nfail"] = snapshot["nfail"] + nfail
+		r.counters["nstarted"] = snapshot["nstarted"] + nstarted
 		r.mu.Unlock()
+	}
+	send := func(c chan<- *worker, w *worker) {
+		select {
+		case <-ctx.Done():
+		case c <- w:
+		}
 	}
 	for ndone < len(runs) {
 		updateCounters()
@@ -191,18 +227,30 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 		case <-ctx.Done():
 			return false, ctx.Err()
 		case <-tick.C:
-			for len(idle) > 0 && time.Since(idle[0].IdleTime) > idleTime {
+			for len(r.idle) > 0 && time.Since(r.idle[0].IdleTime) > idleTime {
 				var w *worker
-				w, idle = idle[0], idle[1:]
+				w, r.idle = r.idle[0], r.idle[1:]
+				log.Printf("worker %s idled out from pool", w)
 				w.Cancel()
 				nworker--
 			}
 		case req := <-r.requestc:
+			if len(r.idle) > 0 {
+				var w *worker
+				w, r.idle = r.idle[0], r.idle[1:]
+				// Make sure that we attempt to return the worker on the correct
+				// channel, e.g., if this idle worker was carried over from a previous
+				// run.
+				w.returnc = workerc
+				go send(req, w)
+				break
+			}
 			requests = append(requests, req)
 			if r.parallelism > 0 && r.parallelism <= nworker {
 				break
 			}
 			nworker++
+			nstarted++
 			go startWorker(ctx, r.b, workerc)
 		case w := <-workerc:
 			if err := w.Err(); err != nil {
@@ -214,14 +262,14 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 			if len(requests) > 0 {
 				req := requests[0]
 				requests = requests[1:]
-				req <- w
+				go send(req, w)
 				break
 			}
 			// Otherwise we put it on a watch list. We don't reap the instance
 			// right away because of the race between dataset completion and
 			// runs starting.
 			w.IdleTime = time.Now()
-			idle = append(idle, w)
+			r.idle = append(r.idle, w)
 		case run := <-donec:
 			s, m := run.Status()
 			log.Printf("run %s: %s %s", run, s, m)
@@ -243,12 +291,15 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 			}
 		}
 	}
-	for _, w := range idle {
-		nworker--
-		w.Cancel()
-	}
 	updateCounters()
 	return nfail == 0 && (ntrials == 0 || len(runs) < ntrials), nil
+}
+
+func (r *Runner) Cancel() {
+	for _, w := range r.idle {
+		w.Cancel()
+	}
+	r.idle = nil
 }
 
 // Allocate allocates a new worker and returns it. Workers must

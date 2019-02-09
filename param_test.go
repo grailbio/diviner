@@ -36,7 +36,7 @@ func TestRange(t *testing.T) {
 	// Naive test for uniformity.
 	var (
 		rng     = rand.New(rand.NewSource(0))
-		r       = diviner.NewRange(beg, end)
+		r       = diviner.NewRange(diviner.Float(beg), diviner.Float(end))
 		sum     float64
 		samples = make([]float64, N)
 	)

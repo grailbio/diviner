@@ -134,6 +134,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"sort"
 	"text/tabwriter"
@@ -258,6 +259,23 @@ func run(study diviner.Study, args []string) {
 	runner := runner.New(study, db, b, *parallelism)
 	expvar.Publish("diviner", expvar.Func(func() interface{} { return runner.Counters() }))
 	http.Handle("/status", runner)
+	if _, ok := study.Oracle.(*oracle.Skopt); ok {
+		nround := (*ntrials + *parallelism - 1) / *parallelism
+		log.Printf("running %d rounds in iterative mode", nround)
+		var total int
+		for round := 0; round < nround; round++ {
+			howmany := *parallelism
+			if total+howmany > *ntrials {
+				howmany = *ntrials - total
+			}
+			log.Printf("running %d trials in round %d", howmany, round)
+			_, err := runner.Do(ctx, howmany)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		return
+	}
 	done, err := runner.Do(ctx, *ntrials)
 	if err != nil {
 		log.Fatal(err)

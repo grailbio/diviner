@@ -9,6 +9,12 @@
 // Script defines the following builtins for defining Diviner
 // configurations:  marks indicate optional arguments.)
 //
+//	config(database, table)
+//		Configures Diviner to use the provided database
+//		("local" or "dynamodb") and the given table
+//		(local filename or dynamodb table name) to store
+// 		all study state.
+//
 //	discrete(v1, v2, v3...)
 //		Defines a discrete parameter that takes on the provided set
 //		set of values (types string, float, or int).
@@ -99,13 +105,15 @@ func init() {
 // the provided filename.
 //
 // Load provides the builtins describes in the package documentation.
-func Load(filename string, src interface{}) ([]diviner.Study, error) {
+func Load(filename string, src interface{}) ([]diviner.Study, Config, error) {
 	thread := &starlark.Thread{
 		Name:  "diviner",
 		Print: func(_ *starlark.Thread, msg string) { log.Printf("%s: %s", filename, msg) },
 	}
 	var studies []diviner.Study
 	thread.SetLocal("studies", &studies)
+	var config Config
+	thread.SetLocal("config", &config)
 	builtins := starlark.StringDict{
 		"discrete":    starlark.NewBuiltin("discrete", makeDiscrete),
 		"range":       starlark.NewBuiltin("range", makeRange),
@@ -116,6 +124,7 @@ func Load(filename string, src interface{}) ([]diviner.Study, error) {
 		"study":       starlark.NewBuiltin("study", makeStudy),
 		"grid_search": &oracleValue{oracle.GridSearch},
 		"skopt":       starlark.NewBuiltin("skopt", makeSkopt),
+		"config":      starlark.NewBuiltin("config", makeConfig),
 	}
 	globals, err := starlark.ExecFile(thread, filename, src, builtins)
 	// Freeze everything now so that if we try to mutate global state
@@ -126,7 +135,7 @@ func Load(filename string, src interface{}) ([]diviner.Study, error) {
 	for _, study := range studies {
 		study.Freeze()
 	}
-	return studies, err
+	return studies, config, err
 }
 
 type oracleValue struct{ diviner.Oracle }
@@ -358,4 +367,28 @@ func makeSkopt(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 		"acq_func?", &skopt.AcquisitionFunc,
 		"acq_optimizer?", &skopt.AcquisitionOptimizer,
 	)
+}
+
+func makeConfig(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var database, table string
+	err := starlark.UnpackArgs(
+		"config", args, kwargs,
+		"database", &database,
+		"table", &table,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	config := thread.Local("config").(*Config)
+	switch database {
+	case "dynamodb":
+		config.Database = DynamoDB
+	case "local":
+		config.Database = Local
+	default:
+		return nil, fmt.Errorf("invalid database %s", database)
+	}
+	config.Table = table
+	return starlark.None, nil
 }

@@ -52,6 +52,22 @@ func (p Params) Sorted() []NamedParam {
 // of metrics may include others for diagnostic purposes.
 type Metrics map[string]float64
 
+func (m Metrics) Equal(n Metrics) bool {
+	if len(m) != len(n) {
+		return false
+	}
+	for k, mv := range m {
+		nv, ok := n[k]
+		if !ok {
+			return false
+		}
+		if mv != nv {
+			return false
+		}
+	}
+	return true
+}
+
 // Merge merges metrics n into m; values in n overwrite values in m.
 func (m *Metrics) Merge(n Metrics) {
 	if *m == nil {
@@ -69,6 +85,11 @@ type Trial struct {
 	// Metrics is the metrics produced by the black box during
 	// the run.
 	Metrics Metrics
+}
+
+// Equal reports whether the two trials are equal.
+func (t Trial) Equal(u Trial) bool {
+	return t.Values.Equal(u.Values) && t.Metrics.Equal(u.Metrics)
 }
 
 // Direction is the direction of the objective.
@@ -221,7 +242,7 @@ type Study struct {
 	// Objective is the objective to be maximized.
 	Objective Objective
 	// Oracle is the oracle used to pick parameter values.
-	Oracle Oracle
+	Oracle Oracle `json:"-"` // TODO(marius): encode oracle name/type/params?
 	// Params is the set of parameters accepted by this
 	// study.
 	Params Params
@@ -229,7 +250,7 @@ type Study struct {
 	// instantiation of values in the ranges as indicated by the black
 	// box parameters defined above); it produces a run configuration
 	// which is then used to conduct a trial of these parameter values.
-	Run func(Values) RunConfig
+	Run func(Values) RunConfig `json:"-"`
 }
 
 // String returns a textual description of the study.

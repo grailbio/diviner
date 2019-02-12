@@ -9,8 +9,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +17,8 @@ import (
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/diviner"
 )
+
+var metricsPrefix = []byte("METRICS: ")
 
 const timeLayout = "20060102.150405"
 
@@ -63,6 +63,8 @@ func (s status) String() string {
 // the run on a worker machine. Instances of run are used by the runner to
 // coordinate runs of individual trials.
 type run struct {
+	diviner.Run
+
 	// Params is the set of values for the trial represented by this run.
 	Values diviner.Values
 
@@ -71,10 +73,6 @@ type run struct {
 
 	// Config is the run config for this trial.
 	Config diviner.RunConfig
-
-	// ID is the ID of the run; assigned sequentially for each runner
-	// instance.
-	ID int
 
 	mu            sync.Mutex
 	status        status
@@ -129,71 +127,57 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 	}
 	r.setStatus(statusRunning, "")
 
-	// Now that it's running, we tee the output of the script and
-	// update its status. This allows scripts to, for example, output
-	// progress bars or other things pertinent for monitoring. This
-	// output is also teed to a local file for output.
-	//
-	// TODO(marius): make the local path configurable via the run.
-	read, write := io.Pipe()
-	writers := []io.Writer{write}
-
-	// Create a path name based on the study and current timestamp.
-	// We include the parameters at the top of the log.
-	path := fmt.Sprintf("%s.%s.run%04d",
-		r.Study.Name, runner.StartTime().Local().Format(timeLayout), r.ID)
-	f, err := os.Create(path)
-	if err != nil {
-		log.Error.Printf("failed to create log file for %s: %v", r, err)
-	} else {
-		fmt.Fprintln(f, "run:", r)
-		writers = append(writers, f)
-	}
-	donec := make(chan struct{})
-	go func() {
-		scan := bufio.NewScanner(read)
-		// In theory, Tensorflow's Progbar should display each update as a
-		// new line when not outputting to a TTY, but its TTY detection
-		// seems broken.
-		scan.Split(scanProgress)
-		for scan.Scan() {
-			line := scan.Text()
-			// TODO: make the prefix configurable, or perhaps even
-			// different ways of communicating metrics.
-			if strings.HasPrefix(line, "METRICS: ") {
-				metrics, err := parseMetrics(strings.TrimPrefix(line, "METRICS: "))
-				if err != nil {
-					log.Error.Printf("error parsing metrics from run %s: %v", r, err)
-				} else {
-					r.report(metrics)
-				}
+	scan := bufio.NewScanner(out)
+	// ScanProgress tells us how to scan "progress bar" output from
+	// the likes of Tensorflow. This allows us to properly separate these
+	// out as lines for status output and also filter them when persisting
+	// run logs.
+	scan.Split(scanProgress)
+	for scan.Scan() {
+		line := scan.Bytes()
+		// TODO: make the prefix configurable, or perhaps even
+		// different ways of communicating metrics.
+		if bytes.HasPrefix(line, metricsPrefix) {
+			line := string(line)
+			metrics, err := parseMetrics(strings.TrimPrefix(line, "METRICS: "))
+			if err != nil {
+				log.Error.Printf("error parsing metrics from run %s: %v", r, err)
 			} else {
-				r.setStatus(statusRunning, line)
+				r.report(metrics)
+				if err := r.Run.Update(ctx, metrics); err != nil {
+					log.Error.Printf("failed to report metrics to DB: %v", err)
+				}
+			}
+		} else {
+			progress := len(line) > 0 && line[len(line)-1] == '\r'
+			if progress {
+				// Drop any '\b's inserted by the progbar.
+				for len(line) > 0 && (line[len(line)-1] == '\r' || line[len(line)-1] == '\b') {
+					line = line[:len(line)-1]
+				}
+			}
+			r.setStatus(statusRunning, string(line))
+			if !progress {
+				if _, err := r.Run.Write(line); err != nil {
+					log.Error.Printf("%s: write: %v", r, err)
+				}
+				if _, err := r.Run.Write([]byte{'\n'}); err != nil {
+					log.Error.Printf("%s: write %v", r, err)
+				}
 			}
 		}
-		// (Ignore errors.)
-		close(donec)
-	}()
-	_, err = io.Copy(io.MultiWriter(writers...), out)
-	if e := out.Close(); err != nil && e != nil {
-		err = e
-	}
-	if f != nil {
-		if err := f.Close(); err != nil {
-			log.Error.Printf("failed to close %s: %v", f.Name(), err)
+		// We have to wait for some output in order to respond to context
+		// cancellations.
+		if err := ctx.Err(); err != nil {
+			break
 		}
 	}
-	// Close the pipe and wait for the final status to be set so we don't
-	// race for setting state.
-	write.Close()
-	select {
-	case <-donec:
-	case <-ctx.Done():
-		r.error(ctx.Err())
-		return
+	if err := r.Run.Flush(); err != nil {
+		log.Error.Printf("%s: flush: %v", r, err)
 	}
+
 	elapsed := time.Since(start)
-	if err == nil {
+	if err := scan.Err(); err == nil {
 		r.setStatus(statusOk, elapsed.String())
 	} else {
 		r.errorf("run failed after %s: %v", elapsed, err)
@@ -267,12 +251,7 @@ func scanProgress(data []byte, atEOF bool) (advance int, token []byte, err error
 		return ni + 1, data[:ni], nil
 	}
 	if ri >= 0 {
-		data = data[:ri]
-		// Drop '\b's inserted by the progbar.
-		for len(data) > 0 && data[len(data)-1] == '\b' {
-			data = data[:len(data)-1]
-		}
-		return ri + 1, data, nil
+		return ri + 1, data[:ri+1], nil
 	}
 	if atEOF {
 		return len(data), data, nil

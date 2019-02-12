@@ -133,18 +133,21 @@ import (
 	"expvar"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"sort"
 	"text/tabwriter"
 
+	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/base/tsv"
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/bigmachine/ec2system"
 	"github.com/grailbio/diviner"
-	"github.com/grailbio/diviner/divinerdb"
+	"github.com/grailbio/diviner/dydb"
+	"github.com/grailbio/diviner/localdb"
 	"github.com/grailbio/diviner/oracle"
 	"github.com/grailbio/diviner/runner"
 	"github.com/grailbio/diviner/script"
@@ -158,6 +161,8 @@ func usage() {
 		Run N trials of the given study with parallelism P.
 	diviner config.dv summarize study
 		Summarizes the known set of trials in the provided study.
+	diviner config.dv logs run
+		Write the logs for the given run to standard output.
 
 Flags:`)
 	flag.PrintDefaults()
@@ -166,7 +171,7 @@ Flags:`)
 
 var (
 	httpaddr = flag.String("http", ":6000", "http status address")
-	dir      = flag.String("dir", "", "prefix where state is stored")
+	dbpath   = flag.String("db", "trials.ddb", "database filename")
 )
 
 func main() {
@@ -185,10 +190,24 @@ func main() {
 	if flag.NArg() < 2 {
 		flag.Usage()
 	}
-	studies, err := script.Load(flag.Arg(0), nil)
+	studies, config, err := script.Load(flag.Arg(0), nil)
 	if err != nil {
 		log.Fatalf("error loading config %s: %v", flag.Arg(0), err)
 	}
+	var database diviner.Database
+	switch config.Database {
+	case script.Local:
+		var err error
+		database, err = localdb.Open(config.Table)
+		if err != nil {
+			log.Fatal(err)
+		}
+	case script.DynamoDB:
+		database = dydb.New(session.New(), config.Table)
+	default:
+		log.Fatalf("invalid database type %d", config.Database)
+	}
+
 	switch flag.Arg(1) {
 	case "list":
 		for _, study := range studies {
@@ -199,13 +218,18 @@ func main() {
 			flag.Usage()
 		}
 		study := find(studies, flag.Arg(2))
-		run(study, flag.Args()[3:])
+		run(database, study, flag.Args()[3:])
 	case "summarize":
 		if flag.NArg() < 3 {
 			flag.Usage()
 		}
 		study := find(studies, flag.Arg(2))
-		summarize(study, flag.Args()[3:])
+		summarize(database, study, flag.Args()[3:])
+	case "logs":
+		if flag.NArg() < 2 {
+			flag.Usage()
+		}
+		logs(database, flag.Args()[2:])
 	default:
 		flag.Usage()
 	}
@@ -222,7 +246,7 @@ func find(studies []diviner.Study, name string) diviner.Study {
 	panic("not reached")
 }
 
-func run(study diviner.Study, args []string) {
+func run(db diviner.Database, study diviner.Study, args []string) {
 	var (
 		flags       = flag.NewFlagSet("run", flag.ExitOnError)
 		ntrials     = flags.Int("trials", 0, "number of trials to run")
@@ -255,7 +279,6 @@ func run(study diviner.Study, args []string) {
 		log.Error.Printf("failed to start diagnostic http server: %v", err)
 	}()
 
-	db := divinerdb.New(*dir)
 	runner := runner.New(study, db, b, *parallelism)
 	expvar.Publish("diviner", expvar.Func(func() interface{} { return runner.Counters() }))
 	http.Handle("/status", runner)
@@ -285,14 +308,21 @@ func run(study diviner.Study, args []string) {
 	}
 }
 
-func summarize(study diviner.Study, args []string) {
+func summarize(db diviner.Database, study diviner.Study, args []string) {
 	if len(args) != 0 {
 		flag.Usage()
 	}
-	db := divinerdb.New(*dir)
-	trials, err := db.Load(study)
+	ctx := context.Background()
+	runs, err := db.Runs(ctx, study, diviner.Complete)
 	if err != nil {
-		log.Fatalf("error loading trials for study %s: %v", study.Name, err)
+		log.Fatalf("error loading runs for study %s: %v", study.Name, err)
+	}
+	trials := make([]diviner.Trial, len(runs))
+	for i, run := range runs {
+		trials[i], err = run.Trial(ctx)
+		if err != nil {
+			log.Fatalf("error retrieving trial from run %s: %v", run, err)
+		}
 	}
 	// Print some study metadata.
 	var tw tabwriter.Writer
@@ -301,7 +331,7 @@ func summarize(study diviner.Study, args []string) {
 	for _, param := range study.Params.Sorted() {
 		fmt.Fprintf(&tw, "#	param %s:	%s\n", param.Name, param)
 	}
-	fmt.Fprintf(&tw, "#	objective: %s\n", study.Objective)
+	fmt.Fprintf(&tw, "#	objective:	%s\n", study.Objective)
 	if err := tw.Flush(); err != nil {
 		log.Fatal(err)
 	}
@@ -356,6 +386,7 @@ func summarize(study diviner.Study, args []string) {
 	sort.Strings(metrics)
 
 	w := tsv.NewWriter(os.Stdout)
+	w.WriteString("run")
 	for _, key := range params {
 		w.WriteString(key)
 	}
@@ -366,7 +397,8 @@ func summarize(study diviner.Study, args []string) {
 	if err := w.EndLine(); err != nil {
 		log.Fatal(err)
 	}
-	for _, trial := range trials {
+	for i, trial := range trials {
+		w.WriteString(runs[i].ID())
 		for _, key := range params {
 			w.WriteString(trial.Values[key].String())
 		}
@@ -383,6 +415,20 @@ func summarize(study diviner.Study, args []string) {
 		}
 	}
 	if err := w.Flush(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func logs(db diviner.Database, args []string) {
+	if len(args) != 1 {
+		flag.Usage()
+	}
+	ctx := context.Background()
+	run, err := db.Run(ctx, args[0])
+	if err != nil {
+		log.Fatalf("error retrieving run %s: %v", args[0], err)
+	}
+	if _, err := io.Copy(os.Stdout, run.Log()); err != nil {
 		log.Fatal(err)
 	}
 }

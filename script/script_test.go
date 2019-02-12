@@ -14,9 +14,12 @@ import (
 )
 
 func TestScript(t *testing.T) {
-	studies, err := script.Load("testdata/simple.diviner", nil)
+	studies, config, err := script.Load("testdata/simple.diviner", nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got, want := config, (script.Config{Database: script.Local, Table: "test"}); got != want {
+		t.Errorf("got %v, want %v", got, want)
 	}
 	if got, want := len(studies), 2; got != want {
 		t.Errorf("got %v, want %v", got, want)
@@ -45,7 +48,7 @@ func TestScript(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 
-	config := studies[0].Run(diviner.Values{
+	runConfig := studies[0].Run(diviner.Values{
 		"learning_rate": diviner.Float(0.1),
 		"dropout":       diviner.Float(0.5),
 	})
@@ -53,7 +56,7 @@ func TestScript(t *testing.T) {
 		Script:     "echo 0.1 0.5",
 		LocalFiles: []string{"x", "y", "z"},
 	}
-	if got, want := config, expect; !reflect.DeepEqual(got, want) {
+	if got, want := runConfig, expect; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
 }

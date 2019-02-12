@@ -1,4 +1,9 @@
 
+config(
+    database="local",
+    table="test",
+)
+
 def run_simple_model(values):
     return run_config(
         script="echo %s %s" % (values["learning_rate"], values["dropout"]),

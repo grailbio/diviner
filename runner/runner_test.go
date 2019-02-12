@@ -17,7 +17,7 @@ import (
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/bigmachine/testsystem"
 	"github.com/grailbio/diviner"
-	"github.com/grailbio/diviner/divinerdb"
+	"github.com/grailbio/diviner/localdb"
 	"github.com/grailbio/diviner/oracle"
 	"github.com/grailbio/diviner/runner"
 	"github.com/grailbio/testutil"
@@ -37,7 +37,10 @@ func TestRunner(t *testing.T) {
 		`, datasetFile, datasetFile),
 	}
 
-	db := divinerdb.New(dir)
+	db, err := localdb.Open(filepath.Join(dir, "test.ddb"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	study := diviner.Study{
 		Name: "test",
 		Params: diviner.Params{
@@ -70,9 +73,16 @@ func TestRunner(t *testing.T) {
 	if !done {
 		t.Fatal("not done")
 	}
-	trials, err := db.Load(study)
+	runs, err := db.Runs(ctx, study, diviner.Complete)
 	if err != nil {
 		t.Fatal(err)
+	}
+	trials := make([]diviner.Trial, len(runs))
+	for i, run := range runs {
+		trials[i], err = run.Trial(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	sort.Slice(trials, func(i, j int) bool {
 		return trials[i].Values["param"].Int() < trials[j].Values["param"].Int()
@@ -108,7 +118,7 @@ func TestRunnerError(t *testing.T) {
 		Name:   "testset",
 		Script: "exit 1",
 	}
-	db := divinerdb.New(dir)
+	db, err := localdb.Open(filepath.Join(dir, "test.ddb"))
 	study := diviner.Study{
 		Name: "test",
 		Params: diviner.Params{
@@ -145,12 +155,12 @@ func TestRunnerError(t *testing.T) {
 	if got, want := counters["nfail"], 2; got != want {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	trials, err := db.Load(study)
+	runs, err := db.Runs(ctx, study, diviner.Complete)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(trials), 0; got != want {
-		t.Error("found trials")
+	if got, want := len(runs), 0; got != want {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 

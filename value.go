@@ -5,10 +5,17 @@
 package diviner
 
 import (
+	"encoding/gob"
 	"fmt"
 	"sort"
 	"strings"
 )
+
+func init() {
+	gob.Register(Float(0))
+	gob.Register(Int(0))
+	gob.Register(String(""))
+}
 
 // Kind represents the kind of a value.
 type Kind int
@@ -127,6 +134,25 @@ func (v String) Str() string { return string(v) }
 // Values is a set of named value, used as a concrete instantiation
 // of a set of parameters.
 type Values map[string]Value
+
+func (v Values) Equal(w Values) bool {
+	if len(v) != len(w) {
+		return false
+	}
+	for k, vv := range v {
+		wv, ok := w[k]
+		if !ok {
+			return false
+		}
+		if vv.Kind() != wv.Kind() {
+			return false
+		}
+		if vv.Less(wv) || wv.Less(vv) {
+			return false
+		}
+	}
+	return true
+}
 
 // String returns a (stable) textual description of the value set.
 func (v Values) String() string {

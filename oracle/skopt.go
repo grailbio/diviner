@@ -7,6 +7,7 @@ package oracle
 import (
 	"bytes"
 	"encoding/csv"
+	"encoding/gob"
 	"fmt"
 	"net/url"
 	"os"
@@ -17,6 +18,10 @@ import (
 
 	"github.com/grailbio/diviner"
 )
+
+func init() {
+	gob.Register(&Skopt{})
+}
 
 // TODO(marius): expand the oracle interface to check if the oracle is available
 // (e.g., in this case, we may not have python or skopt installed)

@@ -5,12 +5,18 @@
 package diviner
 
 import (
+	"encoding/gob"
 	"fmt"
 	"math/rand"
 	"strings"
 
 	"go.starlark.net/starlark"
 )
+
+func init() {
+	gob.Register(Range{})
+	gob.Register(Discrete{})
+}
 
 // A Param is a kind of parameter. Params determine the range of
 // allowable values of an input.
@@ -33,8 +39,8 @@ type Param interface {
 
 // A Discrete is a parameter that takes on a finite set of values.
 type Discrete struct {
-	values []Value
-	kind   Kind
+	DiscreteValues []Value
+	DiscreteKind   Kind
 }
 
 // NewDiscrete returns a new discrete param comprising the
@@ -50,32 +56,32 @@ func NewDiscrete(values ...Value) *Discrete {
 			panic(fmt.Sprintf("diviner.NewDiscrete: mixed kinds: %s and %s", v.Kind(), kind))
 		}
 	}
-	return &Discrete{values: values, kind: kind}
+	return &Discrete{values, kind}
 }
 
 // String returns a description of this parameter.
 func (d *Discrete) String() string {
-	vals := make([]string, len(d.values))
+	vals := make([]string, len(d.DiscreteValues))
 	for i := range vals {
-		vals[i] = d.values[i].String()
+		vals[i] = d.DiscreteValues[i].String()
 	}
 	return fmt.Sprintf("discrete(%s)", strings.Join(vals, ", "))
 }
 
 // Kind returns the kind of values represented by this discrete param.
 func (d *Discrete) Kind() Kind {
-	return d.kind
+	return d.DiscreteKind
 }
 
 // Values returns the possible values of the discrete param in
 // the order given.
 func (d *Discrete) Values() []Value {
-	return d.values
+	return d.DiscreteValues
 }
 
 // Sample draws a value set of parameter values and returns it.
 func (d *Discrete) Sample(r *rand.Rand) Value {
-	return d.values[r.Intn(len(d.values))]
+	return d.DiscreteValues[r.Intn(len(d.DiscreteValues))]
 }
 
 // Type implements starlark.Value.

@@ -21,7 +21,7 @@ import (
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/diviner"
-	"github.com/grailbio/diviner/divinerdb"
+	"github.com/grailbio/diviner/localdb"
 )
 
 // IdleTime is the amount of time workers are allowed to remain idle
@@ -34,7 +34,7 @@ const idleTime = time.Minute
 // Runner is also an http.Handler that prints trial statuses.
 type Runner struct {
 	study       diviner.Study
-	db          *divinerdb.DB
+	db          diviner.Database
 	b           *bigmachine.B
 	parallelism int
 
@@ -58,7 +58,7 @@ type Runner struct {
 // New returns a new runner that will perform trials for the provided study,
 // recording its results to the provided db, using the provided bigmachine.B
 // to create a cluster of machines of at most hte size of the parallelism argument.
-func New(study diviner.Study, db *divinerdb.DB, b *bigmachine.B, parallelism int) *Runner {
+func New(study diviner.Study, db diviner.Database, b *bigmachine.B, parallelism int) *Runner {
 	return &Runner{
 		study:       study,
 		db:          db,
@@ -97,7 +97,7 @@ func (r *Runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	runs := r.runs
 	r.mu.Unlock()
 	for _, run := range runs {
-		row[0] = fmt.Sprint(run.ID)
+		row[0] = fmt.Sprint(run.ID())
 		for i, key := range sorted {
 			if v, ok := run.Values[key]; ok {
 				row[i+1] = v.String()
@@ -153,9 +153,17 @@ func (r *Runner) Counters() map[string]int {
 func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	trials, err := r.db.Load(r.study)
-	if err != nil {
+	complete, err := r.db.Runs(ctx, r.study, diviner.Complete)
+	if err != nil && err != localdb.ErrNoSuchStudy { // XXX
 		return false, err
+	}
+	trials := make([]diviner.Trial, len(complete))
+	for i, run := range complete {
+		var err error
+		trials[i], err = run.Trial(ctx)
+		if err != nil {
+			return false, err
+		}
 	}
 	values, err := r.study.Oracle.Next(trials, r.study.Params, r.study.Objective, ntrials)
 	if err != nil {
@@ -167,10 +175,13 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 	runs := make([]*run, len(values))
 	for i := range values {
 		runs[i] = new(run)
+		runs[i].Run, err = r.db.New(ctx, r.study, values[i])
+		if err != nil {
+			return false, err
+		}
 		runs[i].Study = r.study
 		runs[i].Values = values[i]
 		runs[i].Config = r.study.Run(values[i])
-		runs[i].ID = r.nrun
 		r.nrun++
 	}
 	r.mu.Lock()
@@ -278,11 +289,9 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 			case statusWaiting, statusRunning:
 				log.Error.Printf("run %s returned with incomplete status %s", run, status)
 			case statusOk:
-				if err := r.db.Report(r.study, diviner.Trial{
-					Values:  run.Values,
-					Metrics: run.Metrics(),
-				}); err != nil {
-					log.Printf("error reporting metrics for run %s: %v", run, err)
+				// TODO(marius): store failure state in the database, too.
+				if err := run.Complete(ctx); err != nil {
+					log.Error.Printf("failed to complete run %s: %v", run, err)
 					nfail++
 				}
 			case statusErr:

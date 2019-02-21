@@ -33,19 +33,18 @@ const idleTime = time.Minute
 //
 // Runner is also an http.Handler that prints trial statuses.
 type Runner struct {
-	study       diviner.Study
-	db          diviner.Database
-	b           *bigmachine.B
-	parallelism int
+	study diviner.Study
+	db    diviner.Database
 
-	requestc chan chan<- *worker
+	requestc chan *request
 
 	// Time is the timestamp of runner.
 	time time.Time
 
-	// Idle maintains an idle list of workers, which may be reused
-	// across invocations.
-	idle []*worker
+	// Sessions stores the current set of bigmachine
+	// sessions maintained by the runner, keyed by the
+	// diviner system represented by the session.
+	sessions map[*diviner.System]*session
 
 	mu       sync.Mutex
 	counters map[string]int
@@ -56,18 +55,18 @@ type Runner struct {
 }
 
 // New returns a new runner that will perform trials for the provided study,
-// recording its results to the provided db, using the provided bigmachine.B
-// to create a cluster of machines of at most hte size of the parallelism argument.
-func New(study diviner.Study, db diviner.Database, b *bigmachine.B, parallelism int) *Runner {
+// recording its results to the provided database. The runner uses bigmachine
+// to create new systems according to the run configurations returned from
+// the study.
+func New(study diviner.Study, db diviner.Database) *Runner {
 	return &Runner{
-		study:       study,
-		db:          db,
-		b:           b,
-		parallelism: parallelism,
-		time:        time.Now(),
-		counters:    make(map[string]int),
-		requestc:    make(chan chan<- *worker),
-		datasets:    make(map[string]*dataset),
+		study:    study,
+		db:       db,
+		sessions: make(map[*diviner.System]*session),
+		time:     time.Now(),
+		counters: make(map[string]int),
+		requestc: make(chan *request),
+		datasets: make(map[string]*dataset),
 	}
 }
 
@@ -165,6 +164,7 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 			return false, err
 		}
 	}
+	log.Printf("requesting new points from oracle from %d trials", len(trials))
 	values, err := r.study.Oracle.Next(trials, r.study.Params, r.study.Objective, ntrials)
 	if err != nil {
 		return false, err
@@ -206,12 +206,14 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 	}
 
 	var (
-		requests               []chan<- *worker
 		workerc                = make(chan *worker)
 		tick                   = time.NewTicker(10 * time.Second)
-		nworker                = len(r.idle)
+		nworker                int
 		ndone, nfail, nstarted int
 	)
+	for _, sess := range r.sessions {
+		nworker += len(sess.Idle)
+	}
 	r.mu.Lock()
 	snapshot := make(map[string]int)
 	for k, v := range r.counters {
@@ -226,10 +228,10 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 		r.counters["nstarted"] = snapshot["nstarted"] + nstarted
 		r.mu.Unlock()
 	}
-	send := func(c chan<- *worker, w *worker) {
+	reply := func(r *request, w *worker) {
 		select {
 		case <-ctx.Done():
-		case c <- w:
+		case r.replyc <- w:
 		}
 	}
 	for ndone < len(runs) {
@@ -238,49 +240,72 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 		case <-ctx.Done():
 			return false, ctx.Err()
 		case <-tick.C:
-			for len(r.idle) > 0 && time.Since(r.idle[0].IdleTime) > idleTime {
-				var w *worker
-				w, r.idle = r.idle[0], r.idle[1:]
-				log.Printf("worker %s idled out from pool", w)
-				w.Cancel()
-				nworker--
+			for _, sess := range r.sessions {
+				for len(sess.Idle) > 0 && time.Since(sess.Idle[0].IdleTime) > idleTime {
+					var w *worker
+					w, sess.Idle = sess.Idle[0], sess.Idle[1:]
+					log.Printf("worker %s idled out from pool", w)
+					w.Cancel()
+					sess.N--
+					nworker--
+				}
 			}
 		case req := <-r.requestc:
-			if len(r.idle) > 0 {
-				var w *worker
-				w, r.idle = r.idle[0], r.idle[1:]
+			sess, ok := r.sessions[req.sys]
+			if !ok {
+				sess = &session{System: req.sys}
+				var err error
+				sess.B = bigmachine.Start(req.sys)
+				if err != nil {
+					return false, fmt.Errorf("failed to create session for system %s: %v", req.sys, err)
+				}
+				if sess.Name() != "testsystem" {
+					sess.HandleDebugPrefix("/debug/"+sess.ID+"/", http.DefaultServeMux)
+				}
+				r.sessions[req.sys] = sess
+			}
+			if len(sess.Idle) > 0 {
 				// Make sure that we attempt to return the worker on the correct
 				// channel, e.g., if this idle worker was carried over from a previous
 				// run.
+				var w *worker
+				w, sess.Idle = sess.Idle[0], sess.Idle[1:]
 				w.returnc = workerc
-				go send(req, w)
+				go reply(req, w)
 				break
 			}
-			requests = append(requests, req)
-			if r.parallelism > 0 && r.parallelism <= nworker {
+			sess.Requests = append(sess.Requests, req)
+			if sess.Parallelism > 0 && sess.Parallelism <= sess.N {
 				break
 			}
+			sess.N++
 			nworker++
 			nstarted++
-			go startWorker(ctx, r.b, workerc)
+			w := &worker{
+				Session: sess,
+				returnc: workerc,
+			}
+			go w.Start(ctx)
 		case w := <-workerc:
+			sess := w.Session
 			if err := w.Err(); err != nil {
 				// TODO(marius): allocate a new worker to replace this one.
+				sess.N--
 				nworker--
 				log.Error.Printf("worker %s error: %v", w, err)
 				break
 			}
-			if len(requests) > 0 {
-				req := requests[0]
-				requests = requests[1:]
-				go send(req, w)
+			if len(sess.Requests) > 0 {
+				var req *request
+				req, sess.Requests = sess.Requests[0], sess.Requests[1:]
+				go reply(req, w)
 				break
 			}
 			// Otherwise we put it on a watch list. We don't reap the instance
 			// right away because of the race between dataset completion and
 			// runs starting.
 			w.IdleTime = time.Now()
-			r.idle = append(r.idle, w)
+			sess.Idle = append(sess.Idle, w)
 		case run := <-donec:
 			s, m := run.Status()
 			log.Printf("run %s: %s %s", run, s, m)
@@ -305,23 +330,25 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 }
 
 func (r *Runner) Cancel() {
-	for _, w := range r.idle {
-		w.Cancel()
+	for _, sess := range r.sessions {
+		for _, w := range sess.Idle {
+			w.Cancel()
+		}
+		sess.Idle = nil
 	}
-	r.idle = nil
 }
 
 // Allocate allocates a new worker and returns it. Workers must
 // be returned after they are done by calling w.Return.
-func (r *Runner) allocate(ctx context.Context) (*worker, error) {
-	replyc := make(chan *worker)
+func (r *Runner) allocate(ctx context.Context, sys *diviner.System) (*worker, error) {
+	req := newRequest(sys)
 	select {
-	case r.requestc <- replyc:
+	case r.requestc <- req:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 	select {
-	case w := <-replyc:
+	case w := <-req.Reply():
 		return w, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -342,4 +369,32 @@ func (r *Runner) dataset(ctx context.Context, dataset diviner.Dataset) *dataset 
 	r.datasets[d.Name] = d
 	go d.Do(ctx, r)
 	return d
+}
+
+type request struct {
+	replyc chan *worker
+	sys    *diviner.System
+}
+
+func newRequest(sys *diviner.System) *request {
+	return &request{make(chan *worker), sys}
+}
+
+func (r *request) Reply() <-chan *worker {
+	return r.replyc
+}
+
+// Session stores the bigmachine session and associated state for a
+// single system.
+type session struct {
+	// System is the diviner system from which this session is started.
+	*diviner.System
+	// B is the bigmachine session associated with this system.
+	*bigmachine.B
+	// Idle is a free pool of idle workers, in order of idle-ness.
+	N int
+	// Requests is the pending requests for workers in this system.
+	Requests []*request
+	// Idle is the set of idle workers in this system.
+	Idle []*worker
 }

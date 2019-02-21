@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/diviner"
 	"github.com/grailbio/diviner/oracle"
 	"github.com/grailbio/diviner/script"
@@ -55,6 +56,7 @@ func TestScript(t *testing.T) {
 	expect := diviner.RunConfig{
 		Script:     "echo 0.1 0.5",
 		LocalFiles: []string{"x", "y", "z"},
+		System:     &diviner.System{ID: "local", Parallelism: 1, System: bigmachine.Local},
 	}
 	if got, want := runConfig, expect; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)

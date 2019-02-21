@@ -108,17 +108,16 @@
 //
 // Usage:
 //	diviner config.dv list
-//	diviner config.dv run study [-trials N] [-parallelism P]
+//	diviner config.dv run study [-rounds M] [-trials N]
 //	diviner config.dv summarize study
 //
 // diviner config.dv list lists the studies provided by the
 // configuration config.dv.
 //
-// diviner config.dv run study [-trials N] [-parallelism P] conducts
-// N trials of the named study as configured in config.dv, using a
-// maximum parallelism of P. If N not provided, then all trails are
-// run, as long as the set of trials are finite. If P is not defined,
-// then diviner runs all trials in parallel.
+// diviner config.dv run study  [-rounds M] [-trials N] conducts M
+// rounds (default 1) of N trials of the named study as configured in
+// config.dv. If N not provided, then all trails are run, as long as
+// the set of trials are finite.
 //
 // diviner config.dv summarize study summarizes the named study; it
 // outputs a TSV of all known trials, specifying parameter values.
@@ -157,8 +156,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
 	diviner config.dv list
 		List studies available in the provided configuration.
-	diviner config.dv run study [-trials N] [-parallelism P]
-		Run N trials of the given study with parallelism P.
+	diviner config.dv run study [-rounds M] [-trials N]
+		Run M rounds of N trials of the given study.
 	diviner config.dv summarize study
 		Summarizes the known set of trials in the provided study.
 	diviner config.dv logs run
@@ -169,19 +168,18 @@ Flags:`)
 	os.Exit(2)
 }
 
-var (
-	httpaddr = flag.String("http", ":6000", "http status address")
-	dbpath   = flag.String("db", "trials.ddb", "database filename")
-)
+var httpaddr = flag.String("http", ":6000", "http status address")
 
 func main() {
 	// This is a temporary hack required to bootstrap worker nodes
 	// without also shipping the run spec.
 	//
 	// TODO(marius): fix this in bigmachine itself.
-	if os.Getenv("BIGMACHINE_SYSTEM") == "ec2" {
-		system := new(ec2system.System)
-		log.Fatal(bigmachine.Start(system))
+	switch os.Getenv("BIGMACHINE_SYSTEM") {
+	case "ec2":
+		log.Fatal(bigmachine.Start(new(ec2system.System)))
+	case "local":
+		log.Fatal(bigmachine.Start(bigmachine.Local))
 	}
 	log.SetPrefix("")
 	log.AddFlags()
@@ -248,9 +246,9 @@ func find(studies []diviner.Study, name string) diviner.Study {
 
 func run(db diviner.Database, study diviner.Study, args []string) {
 	var (
-		flags       = flag.NewFlagSet("run", flag.ExitOnError)
-		ntrials     = flags.Int("trials", 0, "number of trials to run")
-		parallelism = flags.Int("parallelism", 0, "maximum run parallelism")
+		flags   = flag.NewFlagSet("run", flag.ExitOnError)
+		ntrials = flags.Int("trials", 0, "number of trials to run in each round")
+		nrounds = flags.Int("rounds", 1, "number of rounds to run")
 	)
 	if err := flags.Parse(args); err != nil {
 		log.Fatal(err)
@@ -259,52 +257,32 @@ func run(db diviner.Database, study diviner.Study, args []string) {
 		flag.Usage()
 	}
 	ctx := context.Background()
-	// TODO(marius): don't hardcode this; specify it in the study.
-	system := &ec2system.System{
-		AMI:             "ami-09294617227072dcc",
-		InstanceProfile: "arn:aws:iam::619867110810:instance-profile/adhoc",
-		InstanceType:    "p3.2xlarge",
-		Diskspace:       300,
-		Dataspace:       800,
-		OnDemand:        true,
-		Flavor:          ec2system.Ubuntu,
-	}
-	b := bigmachine.Start(system)
 	if study.Oracle == nil {
 		study.Oracle = oracle.GridSearch
 	}
-	b.HandleDebug(http.DefaultServeMux)
 	go func() {
 		err := http.ListenAndServe(*httpaddr, nil)
 		log.Error.Printf("failed to start diagnostic http server: %v", err)
 	}()
 
-	runner := runner.New(study, db, b, *parallelism)
+	runner := runner.New(study, db)
 	expvar.Publish("diviner", expvar.Func(func() interface{} { return runner.Counters() }))
 	http.Handle("/status", runner)
-	if _, ok := study.Oracle.(*oracle.Skopt); ok {
-		nround := (*ntrials + *parallelism - 1) / *parallelism
-		log.Printf("running %d rounds in iterative mode", nround)
-		var total int
-		for round := 0; round < nround; round++ {
-			howmany := *parallelism
-			if total+howmany > *ntrials {
-				howmany = *ntrials - total
-			}
-			log.Printf("running %d trials in round %d", howmany, round)
-			_, err := runner.Do(ctx, howmany)
-			if err != nil {
-				log.Fatal(err)
-			}
+
+	var (
+		round int
+		done  bool
+	)
+	for ; !done && round < *nrounds; round++ {
+		log.Printf("starting %d trials in round %d/%d", *ntrials, round, *nrounds)
+		var err error
+		done, err = runner.Do(ctx, *ntrials)
+		if err != nil {
+			log.Fatal(err)
 		}
-		return
-	}
-	done, err := runner.Do(ctx, *ntrials)
-	if err != nil {
-		log.Fatal(err)
 	}
 	if done {
-		log.Printf("study %s complete", study.Name)
+		log.Printf("study %s complete after %d rounds", study.Name, round)
 	}
 }
 

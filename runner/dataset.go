@@ -52,7 +52,7 @@ func (d *dataset) Do(ctx context.Context, runner *Runner) {
 			return
 		}
 	}
-	w, err := runner.allocate(ctx)
+	w, err := runner.allocate(ctx, d.System)
 	if err != nil {
 		d.error(err)
 		return

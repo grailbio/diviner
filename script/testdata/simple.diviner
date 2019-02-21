@@ -4,8 +4,11 @@ config(
     table="test",
 )
 
+local = localsystem("local", 1)
+
 def run_simple_model(values):
     return run_config(
+        system=local,
         script="echo %s %s" % (values["learning_rate"], values["dropout"]),
         local_files=["x", "y", "z"],
     )

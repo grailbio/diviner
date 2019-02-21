@@ -21,6 +21,7 @@ import (
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/base/retry"
 	"github.com/grailbio/bigmachine"
+	"github.com/grailbio/bigmachine/ec2system"
 	"golang.org/x/time/rate"
 )
 
@@ -28,7 +29,10 @@ import (
 // here for testing.
 //
 // TODO(marius): make this unnecessary by fixing bigmachine.
-var Preamble = `set -ex; su - ubuntu; export HOME=/home/ubuntu; `
+var Preamble = `set -ex; `
+
+// PreambleUbuntu is applied to EC2 ubuntu systems.
+var PreambleUbuntu = `su - ubuntu; export HOME=/home/ubuntu; `
 
 var (
 	machineRetry = retry.Jitter(retry.Backoff(30*time.Second, 5*time.Minute, 1.5), 0.5)
@@ -41,19 +45,25 @@ var (
 // provides functions to run commands using the command service, and
 // to return the worker to the main event loop.
 type worker struct {
+	// Machine is the bigmachine machine represented by this worker.
 	*bigmachine.Machine
 
+	// IdleTime is the time at which the worker entered the idle list;
+	// it's maintained by the runner loop.
 	IdleTime time.Time
+
+	// Session is the runner-managed bigmachine session associated with
+	// this worker.
+	Session *session
 
 	returnc chan<- *worker
 	err     error
 }
 
-// StartWorker starts a new worker using the provided bigmachine
+// Start starts the worker w new worker using the provided bigmachine
 // session. Once the worker has started (or failed to start), it is
-// returned on returnc.
-func startWorker(ctx context.Context, b *bigmachine.B, returnc chan<- *worker) {
-	w := &worker{returnc: returnc}
+// returned.
+func (w *worker) Start(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	start := time.Now()
@@ -70,7 +80,7 @@ func startWorker(ctx context.Context, b *bigmachine.B, returnc chan<- *worker) {
 			w.err = err
 			return
 		}
-		machines, err := b.Start(ctx, 1, bigmachine.Services{
+		machines, err := w.Session.Start(ctx, 1, bigmachine.Services{
 			"Cmd": &commandService{},
 		})
 		if err == nil && len(machines) == 0 {
@@ -144,7 +154,10 @@ func (w *worker) CopyFiles(ctx context.Context, files []string) error {
 // output and standard error.
 func (w *worker) Run(ctx context.Context, script string) (io.ReadCloser, error) {
 	var out io.ReadCloser
-	// TODO(marius): allow bigmachine to run under the default user.
+	// TODO(marius): allow EC2 bigmachine to run under the default user.
+	if ec2, ok := w.Session.System.System.(*ec2system.System); ok && ec2.Flavor == ec2system.Ubuntu {
+		script = PreambleUbuntu + script
+	}
 	script = Preamble + script
 	err := w.Call(ctx, "Cmd.Run", []string{"bash", "-c", script}, &out)
 	return out, err

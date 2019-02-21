@@ -171,6 +171,10 @@ type Dataset struct {
 	LocalFiles []string
 	// Script is a Bash script that is run to produce this dataset.
 	Script string
+	// System identifies the system where the dataset run should be
+	// performed. This can be used to schedule dataset jobs with
+	// different kinds of systems requirements.
+	System *System
 }
 
 // String returns a textual description of the dataset.
@@ -215,6 +219,10 @@ type RunConfig struct {
 	// retaining their basenames. (Thus the set of basenames in
 	// the list should not collide.)
 	LocalFiles []string
+	// System identifies the system where the run should be
+	// performed. This can be used to schedule jobs with
+	// different kinds of systems requirements.
+	System *System
 }
 
 // String returns a textual description of the run config.

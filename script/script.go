@@ -28,18 +28,37 @@
 //	maximize(metric)
 //		Defines an objective that maximizes a metric (string).
 //
-//	dataset(name, if_not_exist?, local_files?, script)
+//	localsystem(name, parallelism)
+//		Defines a new local system with the provided name and parallelism.
+//		The provided name is used to identify the system in tools.
+//
+//	ec2system(name, parallelism, ami, instance_profile, instance_type, disk_space?, data_space?, on_demand?, flavor?)
+//		Defines a new EC2-based system of the given name, parallelism, and
+//		configuration. The provided name is used to identify the system in tools.
+//		- ami:              the EC2 AMI to use when launching new instances;
+//		- instance_profile: the IAM instance profile assigned to new instances;
+//		- instance_type:    the instance type used;
+//		- disk_space:       the amount of root disk space created;
+//		- data_space:       the amount of data/scratch space created;
+//		- on_demand:        (bool) whether to launch on-demand instance types;
+//		- flavor:           the flavor of AMI: "ubuntu" or "coreos".
+//		See package github.com/grailbio/bigmachine/ec2system for more details on these
+//		parameters.
+//
+//	dataset(name, system, if_not_exist?, local_files?, script)
 //		Defines a dataset (diviner.Dataset):
 //		- name:         the name of the dataset, which must be unique;
+//		- system:       the system to be used for dataset execution;
 //		- if_not_exist: a URL that is checked for conditional execution;
 //		- local_files:  a list of local files that must be made available
 // 		                in the script's execution environment;
 //		- script:       the script that is run to produce the dataset.
 //
-//	run_config(script, local_files?, datasets?)
+//	run_config(script, system, local_files?, datasets?)
 //		Defines a run config (diviner.RunConfig) representing a single
 //		trial:
 //		- script:      the script that is executed for this trial;
+//		- system:      the system to be used for run execution;
 //		- local_files: a list of local files that must be made available
 //		               in the script's execution environment;
 //		- datasets:    a list of datasets that must be available before
@@ -86,6 +105,8 @@ import (
 	"fmt"
 
 	"github.com/grailbio/base/log"
+	"github.com/grailbio/bigmachine"
+	"github.com/grailbio/bigmachine/ec2system"
 	"github.com/grailbio/diviner"
 	"github.com/grailbio/diviner/oracle"
 	"go.starlark.net/resolve"
@@ -125,6 +146,8 @@ func Load(filename string, src interface{}) ([]diviner.Study, Config, error) {
 		"grid_search": &oracleValue{oracle.GridSearch},
 		"skopt":       starlark.NewBuiltin("skopt", makeSkopt),
 		"config":      starlark.NewBuiltin("config", makeConfig),
+		"localsystem": starlark.NewBuiltin("localsystem", makeLocalSystem),
+		"ec2system":   starlark.NewBuiltin("ec2system", makeEC2System),
 	}
 	globals, err := starlark.ExecFile(thread, filename, src, builtins)
 	// Freeze everything now so that if we try to mutate global state
@@ -296,6 +319,7 @@ func makeRunConfig(thread *starlark.Thread, _ *starlark.Builtin, args starlark.T
 	)
 	err := starlark.UnpackArgs(
 		"run_config", args, kwargs,
+		"system", &config.System,
 		"script", &config.Script,
 		"local_files?", &files,
 		"datasets?", &datasets,
@@ -332,6 +356,7 @@ func makeDataset(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	err := starlark.UnpackArgs(
 		"dataset", args, kwargs,
 		"name", &dataset.Name,
+		"system", &dataset.System,
 		"if_not_exist?", &dataset.IfNotExist,
 		"local_files?", &files,
 		"script", &dataset.Script,
@@ -391,4 +416,56 @@ func makeConfig(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tupl
 	}
 	config.Table = table
 	return starlark.None, nil
+}
+
+func makeLocalSystem(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	system := &diviner.System{System: bigmachine.Local}
+	err := starlark.UnpackArgs(
+		"localsystem", args, kwargs,
+		"name", &system.ID,
+		"parallelism", &system.Parallelism,
+	)
+	return system, err
+}
+
+func makeEC2System(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var (
+		system               = new(diviner.System)
+		ec2                  = new(ec2system.System)
+		flavor               string
+		diskspace, dataspace int // UnpackArgs doesn't support uint
+	)
+	system.System = ec2
+	err := starlark.UnpackArgs(
+		"ec2system", args, kwargs,
+		"name", &system.ID,
+		"parallelism", &system.Parallelism,
+		"ami", &ec2.AMI,
+		"instance_profile", &ec2.InstanceProfile,
+		"instance_type", &ec2.InstanceType,
+		"disk_space?", &diskspace,
+		"data_space?", &dataspace,
+		"on_demand?", &ec2.OnDemand,
+		"flavor?", &flavor,
+	)
+	if err != nil {
+		return nil, err
+	}
+	switch flavor {
+	case "", "ubuntu":
+		ec2.Flavor = ec2system.Ubuntu
+	case "coreos":
+		ec2.Flavor = ec2system.CoreOS
+	default:
+		return nil, fmt.Errorf("invalid AMI flavor %s", flavor)
+	}
+	if diskspace < 0 {
+		return nil, errors.New("negative disk_space not allowed")
+	}
+	if dataspace < 0 {
+		return nil, errors.New("negative data_space not allowed")
+	}
+	ec2.Diskspace = uint(diskspace)
+	ec2.Dataspace = uint(dataspace)
+	return system, nil
 }

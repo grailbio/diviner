@@ -103,7 +103,7 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 			}
 		}
 	}
-	w, err := runner.allocate(ctx)
+	w, err := runner.allocate(ctx, r.Config.System)
 	if err != nil {
 		r.error(err)
 		return
@@ -186,7 +186,7 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 
 // String returns a textual description of this run.
 func (r *run) String() string {
-	return fmt.Sprintf("study=%s,%s", r.Study.Name, r.Values)
+	return r.ID()
 }
 
 // Report merges the provided metrics into the current run metrics.

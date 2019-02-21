@@ -1,7 +1,31 @@
+config(
+    database="local",
+    table="/tmp/local.ddb",
+)
 
+local = localsystem("local", 2)
+
+gpu = ec2system("gpu",
+    parallelism=2,
+    ami="ami-09294617227072dcc",
+    instance_profile="arn:aws:iam::619867110810:instance-profile/adhoc",
+    instance_type="p3.2xlarge",
+    disk_space=300,
+    data_space=800,
+    on_demand=False,
+    flavor="ubuntu",
+)
+
+toy_dataset = dataset("toy", local,
+    script="""
+    echo created dataset
+    """,
+)
 
 def run_toy(params):
     return run_config(
+        datasets=[toy_dataset],
+        system=gpu,
         script="""
             python <<EOF
 import numpy as np

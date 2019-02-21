@@ -295,9 +295,14 @@ func summarize(db diviner.Database, study diviner.Study, args []string) {
 	if err != nil {
 		log.Fatalf("error loading runs for study %s: %v", study.Name, err)
 	}
-	trials := make([]diviner.Trial, len(runs))
+	type trial struct {
+		diviner.Trial
+		diviner.Run
+	}
+	trials := make([]trial, len(runs))
 	for i, run := range runs {
-		trials[i], err = run.Trial(ctx)
+		trials[i].Run = run
+		trials[i].Trial, err = run.Trial(ctx)
 		if err != nil {
 			log.Fatalf("error retrieving trial from run %s: %v", run, err)
 		}
@@ -375,8 +380,8 @@ func summarize(db diviner.Database, study diviner.Study, args []string) {
 	if err := w.EndLine(); err != nil {
 		log.Fatal(err)
 	}
-	for i, trial := range trials {
-		w.WriteString(runs[i].ID())
+	for _, trial := range trials {
+		w.WriteString(trial.ID())
 		for _, key := range params {
 			w.WriteString(trial.Values[key].String())
 		}

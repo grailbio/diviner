@@ -130,7 +130,8 @@
 //	diviner config.dv list
 //	diviner config.dv run study [-rounds M] [-trials N]
 //	diviner config.dv summarize study
-//	diviner config.dv ps study
+//	diviner config.dv ps
+//	diviner config.dv ps studies...
 //	diviner config.dv logs runID
 //
 // diviner config.dv list lists the studies provided by the
@@ -145,10 +146,15 @@
 // outputs a TSV of all known completed trials, specifying parameter
 // values. The TSV is ordered by the objective.
 //
-// diviner config.dv ps study returns a summary of currently ongoing runs for the
-// provided study. The output includes information about each pending
-// run, the last line of log output (which may be a progress bar), and the
-// latest reported metrics.
+// diviner config.dv ps returns a summary of currently ongoing runs
+// for all studies. The output includes information about each
+// pending run, the last line of log output (which may be a progress
+// bar), and the latest reported metrics.
+//
+// diviner config.dv ps studies... returns a summary of currently
+// ongoing runs for the provided studies. The output includes
+// information about each pending run, the last line of log output
+// (which may be a progress bar), and the latest reported metrics.
 //
 // diviner config.dv logs runID writes the log output of a run to standard output.
 // The run identified by a run identifier which may be retrieved by the "summarize"
@@ -192,8 +198,10 @@ func usage() {
 		Run M rounds of N trials of the given study.
 	diviner config.dv summarize study
 		Summarizes the known set of trials in the provided study.
-	diviner config.dv ps study
-		Summarize currently ongoing trials for the provided study.
+	diviner config.dv ps
+		Summarize currently ongoing trials in all trials.
+	diviner config.dv ps studies...
+		Summarize currently ongoing trials for the provided studies.
 	diviner config.dv logs run
 		Write the logs for the given run to standard output.
 
@@ -258,11 +266,10 @@ func main() {
 		study := find(studies, flag.Arg(2))
 		summarize(database, study, flag.Args()[3:])
 	case "ps":
-		if flag.NArg() < 3 {
+		if flag.NArg() < 2 {
 			flag.Usage()
 		}
-		study := find(studies, flag.Arg(2))
-		ps(database, study, flag.Args()[3:])
+		ps(database, studies, flag.Args()[2:])
 	case "logs":
 		if flag.NArg() < 2 {
 			flag.Usage()
@@ -443,63 +450,83 @@ func summarize(db diviner.Database, study diviner.Study, args []string) {
 	}
 }
 
-func ps(db diviner.Database, study diviner.Study, args []string) {
-	if len(args) != 0 {
-		flag.Usage()
+func ps(db diviner.Database, studies []diviner.Study, args []string) {
+	if len(args) > 0 {
+		keep := make(map[string]bool)
+		for _, study := range args {
+			keep[study] = true
+		}
+		var n int
+		for _, study := range studies {
+			if keep[study.Name] {
+				studies[n] = study
+				n++
+			}
+		}
+		studies = studies[:n]
 	}
 	ctx := context.Background()
-	runs, err := db.Runs(ctx, study, diviner.Pending)
-	if err != nil {
-		log.Fatal(err)
+	if len(studies) == 0 {
+		log.Printf("no studies")
+		return
 	}
-
-	sorted := make([]string, 0, len(study.Params))
-	for key := range study.Params {
-		sorted = append(sorted, key)
-	}
-	sort.Strings(sorted)
-	var tw tabwriter.Writer
-	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
-	io.WriteString(&tw, "id\t")
-	io.WriteString(&tw, strings.Join(sorted, "\t"))
-	fmt.Fprintln(&tw, "\tmetrics\tstatus")
-	for _, run := range runs {
-		row := make([]string, len(sorted)+3)
-		row[0] = fmt.Sprint(run.ID())
-		status, err := run.Status(ctx)
+	for _, study := range studies {
+		runs, err := db.Runs(ctx, study, diviner.Pending)
 		if err != nil {
-			row[len(row)-1] = err.Error()
-		} else {
-			row[len(row)-1] = status
+			log.Fatal(err)
 		}
-		values := run.Values()
-		for i, key := range sorted {
-			if v, ok := values[key]; ok {
-				row[i+1] = v.String()
+		if len(runs) == 0 {
+			continue
+		}
+		fmt.Printf("study %s: %s\n", study.Name, study.Params)
+		sorted := make([]string, 0, len(study.Params))
+		for key := range study.Params {
+			sorted = append(sorted, key)
+		}
+		sort.Strings(sorted)
+		var tw tabwriter.Writer
+		tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
+		io.WriteString(&tw, "id\t")
+		io.WriteString(&tw, strings.Join(sorted, "\t"))
+		fmt.Fprintln(&tw, "\tmetrics\tstatus")
+		for _, run := range runs {
+			row := make([]string, len(sorted)+3)
+			row[0] = fmt.Sprint(run.ID())
+			status, err := run.Status(ctx)
+			if err != nil {
+				row[len(row)-1] = err.Error()
 			} else {
-				row[i+1] = "NA"
+				row[len(row)-1] = status
 			}
+			values := run.Values()
+			for i, key := range sorted {
+				if v, ok := values[key]; ok {
+					row[i+1] = v.String()
+				} else {
+					row[i+1] = "NA"
+				}
+			}
+			if metrics, err := run.Metrics(ctx); err != nil {
+				row[len(row)-2] = err.Error()
+			} else if len(metrics) == 0 {
+				row[len(row)-2] = "NA"
+			} else {
+				keys := make([]string, 0, len(metrics))
+				for key := range metrics {
+					keys = append(keys, key)
+				}
+				sort.Strings(keys)
+				elems := make([]string, len(keys))
+				for i, key := range keys {
+					elems[i] = fmt.Sprintf("%s=%f", key, metrics[key])
+				}
+				row[len(row)-2] = strings.Join(elems, ",")
+			}
+			io.WriteString(&tw, strings.Join(row, "\t"))
+			fmt.Fprintln(&tw)
 		}
-		if metrics, err := run.Metrics(ctx); err != nil {
-			row[len(row)-2] = err.Error()
-		} else if len(metrics) == 0 {
-			row[len(row)-2] = "NA"
-		} else {
-			keys := make([]string, 0, len(metrics))
-			for key := range metrics {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			elems := make([]string, len(keys))
-			for i, key := range keys {
-				elems[i] = fmt.Sprintf("%s=%f", key, metrics[key])
-			}
-			row[len(row)-2] = strings.Join(elems, ",")
-		}
-		io.WriteString(&tw, strings.Join(row, "\t"))
-		fmt.Fprintln(&tw)
+		tw.Flush()
 	}
-	tw.Flush()
 }
 
 func logs(db diviner.Database, args []string) {

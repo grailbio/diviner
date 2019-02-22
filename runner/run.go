@@ -91,6 +91,9 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 		// This will kick off processing if it's not already started.
 		datasets[i] = runner.dataset(ctx, dataset)
 	}
+	if len(datasets) > 0 {
+		r.setStatus(statusWaiting, "waiting for datasets to complete processing")
+	}
 	for _, dataset := range datasets {
 		select {
 		case <-ctx.Done():
@@ -103,6 +106,7 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 			}
 		}
 	}
+	r.setStatus(statusWaiting, "waiting for worker")
 	w, err := runner.allocate(ctx, r.Config.System)
 	if err != nil {
 		r.error(err)
@@ -212,6 +216,9 @@ func (r *run) Metrics() diviner.Metrics {
 
 // SetStatus sets the status for the run.
 func (r *run) setStatus(status status, message string) {
+	if err := r.SetStatus(context.Background(), fmt.Sprintf("%s: %s", status, message)); err != nil {
+		log.Error.Printf("run %s: error setting status: %v", r, message)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.status = status

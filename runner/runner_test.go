@@ -77,13 +77,14 @@ func TestRunner(t *testing.T) {
 	if !done {
 		t.Fatal("not done")
 	}
-	runs, err := db.Runs(ctx, study, diviner.Complete)
+	runs, err := db.Runs(ctx, study, diviner.Success)
 	if err != nil {
 		t.Fatal(err)
 	}
 	trials := make([]diviner.Trial, len(runs))
 	for i, run := range runs {
-		trials[i], err = run.Trial(ctx)
+		trials[i].Values = run.Values()
+		trials[i].Metrics, err = run.Metrics(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -166,7 +167,7 @@ func TestRunnerError(t *testing.T) {
 	if got, want := counters["nfail"], 2; got != want {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	runs, err := db.Runs(ctx, study, diviner.Complete)
+	runs, err := db.Runs(ctx, study, diviner.Success)
 	if err != nil {
 		t.Fatal(err)
 	}

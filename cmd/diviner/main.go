@@ -2,9 +2,6 @@
 // Use of this source code is governed by the Apache 2.0
 // license that can be found in the LICENSE file.
 
-// BUG(marius): We currently use a hardcoded bigmachine
-// configuration; make this configurable via the diviner config.
-
 // Diviner is a black-box optimization framework that uses Bigmachine
 // to distribute a large number of computationally expensive trials
 // across clusters of machines.
@@ -46,7 +43,28 @@
 //
 // As an example, here's a Diviner configuration that tries to
 // maximize the accuracy of a model, parameterized by the optimizer
-// used and training batch size:
+// used and training batch size. It uses an Amazon GPU instance to
+// train the model but creates the dataset on the local machine.
+// Run state is stored in the "testdiviner" DynamoDB table.
+//
+//	config(database="dynamodb", table="testdiviner")
+//
+//	# local defines a system using the local machine with a maximum
+//	# parallelism of 2.
+//	local = localsystem("local", 2)
+//
+//	# gpu defines a system using an AWS EC2 GPU instance; a maximum of
+//	# 100 such instances will be created at any given time.
+//	gpu = ec2system("gpu",
+//	    parallelism=100,
+//	    ami="ami-09294617227072dcc",
+//	    instance_profile="arn:aws:iam::619867110810:instance-profile/adhoc",
+//	    instance_type="p3.2xlarge",
+//	    disk_space=300,
+//	    data_space=800,
+//	    on_demand=False,
+//	    flavor="ubuntu",
+//	)
 //
 //	# model_files is the set of (local) files required to run
 //	# training and evaluation for the model.
@@ -58,6 +76,7 @@
 //	    url = "s3://grail-datasets/regions%s" % region
 //	    return dataset(
 //	        name="region%s" % region,
+//	        system=local,
 //	        if_not_exist=url,
 //	        local_files=["make_dataset.py"],
 //	        script="makedataset.py %s %s" % (region, url),
@@ -68,6 +87,7 @@
 //	def run_model(pvalues):
 //	  return run_config(
 //	    datasets = [create_dataset(pvalues["region"])],
+//	    system=gpu,
 //	    local_files=model_files,
 //	    script="""
 //	      python neural_network.py \
@@ -110,6 +130,8 @@
 //	diviner config.dv list
 //	diviner config.dv run study [-rounds M] [-trials N]
 //	diviner config.dv summarize study
+//	diviner config.dv ps study
+//	diviner config.dv logs runID
 //
 // diviner config.dv list lists the studies provided by the
 // configuration config.dv.
@@ -120,8 +142,17 @@
 // the set of trials are finite.
 //
 // diviner config.dv summarize study summarizes the named study; it
-// outputs a TSV of all known trials, specifying parameter values.
-// The TSV is ordered by the objective.
+// outputs a TSV of all known completed trials, specifying parameter
+// values. The TSV is ordered by the objective.
+//
+// diviner config.dv ps study returns a summary of currently ongoing runs for the
+// provided study. The output includes information about each pending
+// run, the last line of log output (which may be a progress bar), and the
+// latest reported metrics.
+//
+// diviner config.dv logs runID writes the log output of a run to standard output.
+// The run identified by a run identifier which may be retrieved by the "summarize"
+// or "list" commands.
 //
 // [1] https://www.kdd.org/kdd2017/papers/view/google-vizier-a-service-for-black-box-optimization
 // [2] https://docs.bazel.build/versions/master/skylark/language.html
@@ -137,6 +168,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -160,6 +192,8 @@ func usage() {
 		Run M rounds of N trials of the given study.
 	diviner config.dv summarize study
 		Summarizes the known set of trials in the provided study.
+	diviner config.dv ps study
+		Summarize currently ongoing trials for the provided study.
 	diviner config.dv logs run
 		Write the logs for the given run to standard output.
 
@@ -223,6 +257,12 @@ func main() {
 		}
 		study := find(studies, flag.Arg(2))
 		summarize(database, study, flag.Args()[3:])
+	case "ps":
+		if flag.NArg() < 3 {
+			flag.Usage()
+		}
+		study := find(studies, flag.Arg(2))
+		ps(database, study, flag.Args()[3:])
 	case "logs":
 		if flag.NArg() < 2 {
 			flag.Usage()
@@ -291,18 +331,19 @@ func summarize(db diviner.Database, study diviner.Study, args []string) {
 		flag.Usage()
 	}
 	ctx := context.Background()
-	runs, err := db.Runs(ctx, study, diviner.Complete)
+	runs, err := db.Runs(ctx, study, diviner.Success)
 	if err != nil {
 		log.Fatalf("error loading runs for study %s: %v", study.Name, err)
 	}
 	type trial struct {
 		diviner.Trial
-		diviner.Run
+		Run diviner.Run
 	}
 	trials := make([]trial, len(runs))
 	for i, run := range runs {
 		trials[i].Run = run
-		trials[i].Trial, err = run.Trial(ctx)
+		trials[i].Trial.Values = run.Values()
+		trials[i].Trial.Metrics, err = run.Metrics(ctx)
 		if err != nil {
 			log.Fatalf("error retrieving trial from run %s: %v", run, err)
 		}
@@ -381,7 +422,7 @@ func summarize(db diviner.Database, study diviner.Study, args []string) {
 		log.Fatal(err)
 	}
 	for _, trial := range trials {
-		w.WriteString(trial.ID())
+		w.WriteString(trial.Run.ID())
 		for _, key := range params {
 			w.WriteString(trial.Values[key].String())
 		}
@@ -400,6 +441,65 @@ func summarize(db diviner.Database, study diviner.Study, args []string) {
 	if err := w.Flush(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func ps(db diviner.Database, study diviner.Study, args []string) {
+	if len(args) != 0 {
+		flag.Usage()
+	}
+	ctx := context.Background()
+	runs, err := db.Runs(ctx, study, diviner.Pending)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	sorted := make([]string, 0, len(study.Params))
+	for key := range study.Params {
+		sorted = append(sorted, key)
+	}
+	sort.Strings(sorted)
+	var tw tabwriter.Writer
+	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
+	io.WriteString(&tw, "id\t")
+	io.WriteString(&tw, strings.Join(sorted, "\t"))
+	fmt.Fprintln(&tw, "\tmetrics\tstatus")
+	for _, run := range runs {
+		row := make([]string, len(sorted)+3)
+		row[0] = fmt.Sprint(run.ID())
+		status, err := run.Status(ctx)
+		if err != nil {
+			row[len(row)-1] = err.Error()
+		} else {
+			row[len(row)-1] = status
+		}
+		values := run.Values()
+		for i, key := range sorted {
+			if v, ok := values[key]; ok {
+				row[i+1] = v.String()
+			} else {
+				row[i+1] = "NA"
+			}
+		}
+		if metrics, err := run.Metrics(ctx); err != nil {
+			row[len(row)-2] = err.Error()
+		} else if len(metrics) == 0 {
+			row[len(row)-2] = "NA"
+		} else {
+			keys := make([]string, 0, len(metrics))
+			for key := range metrics {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			elems := make([]string, len(keys))
+			for i, key := range keys {
+				elems[i] = fmt.Sprintf("%s=%f", key, metrics[key])
+			}
+			row[len(row)-2] = strings.Join(elems, ",")
+		}
+		io.WriteString(&tw, strings.Join(row, "\t"))
+		fmt.Fprintln(&tw)
+	}
+	tw.Flush()
 }
 
 func logs(db diviner.Database, args []string) {

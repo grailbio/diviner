@@ -27,10 +27,10 @@ import (
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/base/sync/once"
 	"github.com/grailbio/diviner"
+	"golang.org/x/time/rate"
 )
 
-// ErrIncompleteTrial indicates that the trial has not yet completed.
-var ErrIncompleteTrial = errors.New("incomplete trial")
+const keepaliveInterval = 30 * time.Second
 
 var logGroups once.Map
 
@@ -61,6 +61,7 @@ func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values
 	if err != nil {
 		return nil, err
 	}
+	startTime := time.Now().UTC().Format(time.RFC3339)
 	_, err = d.db.PutItem(&dynamodb.PutItemInput{
 		TableName: aws.String(d.table),
 		Item: map[string]*dynamodb.AttributeValue{
@@ -68,36 +69,48 @@ func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values
 			"run":   {N: aws.String(fmt.Sprint(seq))},
 			// TODO(marius): it might be nice to expose these to dynamodb
 			// so they can be part of direct queries.
-			"values":       {B: b.Bytes()},
-			"metrics_list": {L: []*dynamodb.AttributeValue{}},
-			"complete":     {BOOL: aws.Bool(false)},
+			"values":    {B: b.Bytes()},
+			"metrics":   {L: []*dynamodb.AttributeValue{}},
+			"state":     {S: aws.String(diviner.Pending.String())},
+			"timestamp": {S: aws.String(startTime)},
+			"keepalive": {S: aws.String(startTime)},
 		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &run{
+	bgctx, cancel := context.WithCancel(context.Background())
+	r := &run{
 		sess:      d.sess,
 		db:        d.db,
 		table:     d.table,
-		Values:    values,
+		values:    values,
 		studyName: study.Name,
 		seq:       seq,
 		state:     diviner.Pending,
-	}, nil
+		cancel:    cancel,
+		statusc:   make(chan string, 1),
+	}
+	go r.keepalive(bgctx)
+	go r.updater(bgctx)
+	return r, nil
 }
 
 // Runs implements diviner.Database.
 func (d *DB) Runs(ctx context.Context, study diviner.Study, states diviner.RunState) (runs []diviner.Run, err error) {
+	minPendingTime := time.Now().Add(-2 * keepaliveInterval).UTC().Format(time.RFC3339)
 	var lastKey map[string]*dynamodb.AttributeValue
 	for {
 		input := &dynamodb.ScanInput{
 			TableName:        aws.String(d.table),
-			FilterExpression: aws.String(`study = :study AND run > :zero`),
+			FilterExpression: aws.String(`#study = :study AND #run > :zero AND (#state <> :pending OR #keepalive > :min_pending_time)`),
 			ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-				":study": {S: aws.String(study.Name)},
-				":zero":  {N: aws.String("0")},
+				":study":            {S: aws.String(study.Name)},
+				":zero":             {N: aws.String("0")},
+				":pending":          {S: aws.String("pending")},
+				":min_pending_time": {S: aws.String(minPendingTime)},
 			},
+			ExpressionAttributeNames: attributeNames("study", "run", "state", "keepalive"),
 		}
 		if lastKey != nil {
 			input.ExclusiveStartKey = lastKey
@@ -150,13 +163,14 @@ func (d *DB) nextSeq(ctx context.Context, study diviner.Study) (uint64, error) {
 	}
 	_, err := d.db.PutItemWithContext(ctx, &dynamodb.PutItemInput{
 		TableName:           aws.String(d.table),
-		ConditionExpression: aws.String(`attribute_not_exists(study)`),
+		ConditionExpression: aws.String(`attribute_not_exists(#study)`),
 		Item: map[string]*dynamodb.AttributeValue{
 			"study":       {S: aws.String(study.Name)},
 			"run":         {N: aws.String("0")},
 			"num_studies": {N: aws.String("0")},
 			"meta":        {B: b.Bytes()},
 		},
+		ExpressionAttributeNames: attributeNames("study"),
 	})
 	if err != nil {
 		aerr, ok := err.(awserr.Error)
@@ -170,11 +184,12 @@ func (d *DB) nextSeq(ctx context.Context, study diviner.Study) (uint64, error) {
 			"study": {S: aws.String(study.Name)},
 			"run":   {N: aws.String("0")},
 		},
-		UpdateExpression: aws.String(`SET num_studies = num_studies + :one`),
+		UpdateExpression: aws.String(`SET #num_studies = #num_studies + :one`),
 		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
 			":one": {N: aws.String("1")},
 		},
-		ReturnValues: aws.String(`UPDATED_NEW`),
+		ExpressionAttributeNames: attributeNames("num_studies"),
+		ReturnValues:             aws.String(`UPDATED_NEW`),
 	})
 	if err != nil {
 		return 0, err
@@ -188,13 +203,14 @@ func (d *DB) nextSeq(ctx context.Context, study diviner.Study) (uint64, error) {
 
 // A run is a single diviner run. It implements diviner.Run on top of dynamodb.
 type run struct {
-	sess  *session.Session
-	db    *dynamodb.DynamoDB
-	table string
-	diviner.Values
+	sess      *session.Session
+	db        *dynamodb.DynamoDB
+	table     string
+	values    diviner.Values
 	studyName string
 	seq       uint64
 	state     diviner.RunState
+	cancel    func()
 
 	once   sync.Once
 	writec chan []byte
@@ -203,6 +219,12 @@ type run struct {
 	cloudwatchOnce once.Task
 	logs           *cloudwatchlogs.CloudWatchLogs
 	logsSeq        *string
+
+	statusc chan string
+}
+
+func (r *run) String() string {
+	return r.ID()
 }
 
 func (r *run) get() error {
@@ -226,8 +248,8 @@ func (r *run) unmarshal(attrs map[string]*dynamodb.AttributeValue) error {
 	if values := attrs["values"]; values == nil || values.B == nil {
 		return errors.New("missing values")
 	}
-	if complete := attrs["complete"]; complete == nil || complete.BOOL == nil {
-		return errors.New("missing complete")
+	if state := attrs["state"]; state == nil || state.S == nil {
+		return errors.New("missing state")
 	}
 	r.studyName = *attrs["study"].S
 	var err error
@@ -235,13 +257,19 @@ func (r *run) unmarshal(attrs map[string]*dynamodb.AttributeValue) error {
 	if err != nil {
 		return err
 	}
-	if err := gob.NewDecoder(bytes.NewReader(attrs["values"].B)).Decode(&r.Values); err != nil {
+	if err := gob.NewDecoder(bytes.NewReader(attrs["values"].B)).Decode(&r.values); err != nil {
 		return err
 	}
-	if *attrs["complete"].BOOL {
-		r.state = diviner.Complete
-	} else {
+	switch state := *attrs["state"].S; state {
+	case "pending":
 		r.state = diviner.Pending
+	case "success":
+		r.state = diviner.Success
+	case "failure":
+		r.state = diviner.Failure
+	default:
+		log.Printf("run %s has unknown state %s", r, state)
+		r.state = 0
 	}
 	return nil
 }
@@ -278,48 +306,81 @@ func (r *run) Update(ctx context.Context, metrics diviner.Metrics) error {
 	_, err := r.db.UpdateItemWithContext(ctx, &dynamodb.UpdateItemInput{
 		TableName:        aws.String(r.table),
 		Key:              r.key(),
-		UpdateExpression: aws.String(`SET metrics_list = list_append(metrics_list, :metrics)`),
+		UpdateExpression: aws.String(`SET #metrics = list_append(#metrics, :metrics)`),
 		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
 			":metrics": {L: []*dynamodb.AttributeValue{metricsValue(metrics)}},
 		},
+		ExpressionAttributeNames: attributeNames("metrics"),
 	})
 	return err
 }
 
-// Trial implements diviner.Run.
-func (r *run) Trial(ctx context.Context) (trial diviner.Trial, err error) {
+// SetStatus implemnets diviner.Run.
+func (r *run) SetStatus(ctx context.Context, status string) error {
+	for {
+		select {
+		case r.statusc <- status:
+			return nil
+		case <-r.statusc:
+		}
+	}
+}
+
+// Status implements diviner.Run.
+func (r *run) Status(ctx context.Context) (string, error) {
+	out, err := r.db.GetItemWithContext(ctx, &dynamodb.GetItemInput{
+		TableName:                aws.String(r.table),
+		Key:                      r.key(),
+		ProjectionExpression:     aws.String("#status"),
+		ExpressionAttributeNames: attributeNames("status"),
+	})
+	if err != nil {
+		return "", err
+	}
+	status := out.Item["status"]
+	if status == nil {
+		return "", nil
+	}
+	return aws.StringValue(status.S), nil
+}
+
+// Values implements diviner.Run.
+func (r *run) Values() diviner.Values {
+	return r.values
+}
+
+// Metrics implements diviner.Run.
+func (r *run) Metrics(ctx context.Context) (metrics diviner.Metrics, err error) {
 	out, err := r.db.GetItemWithContext(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(r.table),
 		Key:       r.key(),
 	})
 	if err != nil {
-		return diviner.Trial{}, err
+		return nil, err
 	}
-	list := out.Item["metrics_list"].L
+	list := out.Item["metrics"].L
 	if len(list) == 0 {
-		return diviner.Trial{}, ErrIncompleteTrial
+		return nil, nil
 	}
-	metrics, err := valueMetrics(list[len(list)-1])
-	if err != nil {
-		return diviner.Trial{}, err
-	}
-	return diviner.Trial{r.Values, metrics}, nil
+	return valueMetrics(list[len(list)-1])
 }
 
 // Complete implements diviner.Run.
-func (r *run) Complete(ctx context.Context) error {
+func (r *run) Complete(ctx context.Context, state diviner.RunState) error {
 	_, err := r.db.UpdateItemWithContext(ctx, &dynamodb.UpdateItemInput{
 		TableName:        aws.String(r.table),
 		Key:              r.key(),
-		UpdateExpression: aws.String(`SET complete = :true`),
+		UpdateExpression: aws.String(`SET #state = :state`),
 		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-			":true": {BOOL: aws.Bool(true)},
+			":state": {S: aws.String(state.String())},
 		},
+		ExpressionAttributeNames: attributeNames("state"),
 	})
 	if err == nil {
-		r.state = diviner.Complete
+		r.state = state
 	}
 	r.flusher(true)
+	r.cancel()
 	return err
 }
 
@@ -356,6 +417,9 @@ func (r *run) flushLoop() {
 			var err error
 			if len(events) > 0 {
 				err = r.flush(events)
+			}
+			if err == nil {
+				events = nil
 			}
 			lastFlush = time.Now()
 			if flush != nil {
@@ -460,6 +524,63 @@ func (r *run) key() map[string]*dynamodb.AttributeValue {
 	}
 }
 
+func (r *run) keepalive(ctx context.Context) {
+	tick := time.NewTicker(keepaliveInterval / 2)
+	defer tick.Stop()
+	for {
+		select {
+		case <-tick.C:
+		case <-ctx.Done():
+			return
+		}
+		// TODO(marius): it would be more efficient to do a batch update of all pending runs.
+		_, err := r.db.UpdateItemWithContext(ctx, &dynamodb.UpdateItemInput{
+			TableName:        aws.String(r.table),
+			Key:              r.key(),
+			UpdateExpression: aws.String(`SET #keepalive = :timestamp`),
+			ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
+				":timestamp": {S: aws.String(time.Now().UTC().Format(time.RFC3339))},
+			},
+			ExpressionAttributeNames: attributeNames("keepalive"),
+		})
+		if err != nil {
+			log.Error.Printf("run %s: failed to update keepalive timestamp: %v", r, err)
+		}
+	}
+}
+
+func (r *run) updater(ctx context.Context) {
+	limiter := rate.NewLimiter(rate.Every(10*time.Second), 2)
+	for {
+		var status string
+		select {
+		case <-ctx.Done():
+			return
+		case status = <-r.statusc:
+		}
+		if err := limiter.Wait(ctx); err != nil {
+			return
+		}
+		// We may have a new status by now.
+		select {
+		case status = <-r.statusc:
+		default:
+		}
+		_, err := r.db.UpdateItemWithContext(ctx, &dynamodb.UpdateItemInput{
+			TableName:        aws.String(r.table),
+			Key:              r.key(),
+			UpdateExpression: aws.String(`SET #status = :status`),
+			ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
+				":status": {S: aws.String(status)},
+			},
+			ExpressionAttributeNames: attributeNames("status"),
+		})
+		if err != nil {
+			log.Error.Printf("run %s: failed to set status %s: %v", r, status, err)
+		}
+	}
+}
+
 func metricsValue(m diviner.Metrics) *dynamodb.AttributeValue {
 	v := new(dynamodb.AttributeValue)
 	v.M = make(map[string]*dynamodb.AttributeValue)
@@ -530,4 +651,14 @@ func (r *logReader) append(buf []byte) ([]byte, error) {
 	}
 	r.nextToken = out.NextForwardToken
 	return buf, nil
+}
+
+// AttributeNames returns the given tokens a DynamoDB attribute
+// name map.
+func attributeNames(attrs ...string) map[string]*string {
+	m := make(map[string]*string)
+	for _, attr := range attrs {
+		m["#"+attr] = aws.String(attr)
+	}
+	return m
 }

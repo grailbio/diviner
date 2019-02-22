@@ -53,9 +53,12 @@ func TestDB(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 
-	_, err = run2.Trial(ctx)
-	if got, want := err, localdb.ErrIncompleteRun; got != want {
+	metrics, err := run2.Metrics(ctx)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(metrics) != 0 {
+		t.Fatal("reported metrics")
 	}
 	if got, want := run2.State(), diviner.Pending; got != want {
 		t.Errorf("got %v, want %v", got, want)
@@ -65,18 +68,15 @@ func TestDB(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	trial, err := run2.Trial(ctx)
+	metrics, err = run2.Metrics(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := trial.Values, values; !got.Equal(want) {
-		t.Errorf("got %v, want %v", got, want)
-	}
-	if got, want := trial.Metrics, (diviner.Metrics{"acc": 0}); !reflect.DeepEqual(got, want) {
+	if got, want := metrics, (diviner.Metrics{"acc": 0}); !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 
-	runs, err := db.Runs(ctx, study, diviner.Pending|diviner.Complete)
+	runs, err := db.Runs(ctx, study, diviner.Any)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,24 +97,24 @@ func TestDB(t *testing.T) {
 		}
 	}
 
-	runs, err = db.Runs(ctx, study, diviner.Pending|diviner.Complete)
+	runs, err = db.Runs(ctx, study, diviner.Any)
 	if got, want := len(runs), N; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 	for _, run := range runs {
-		if err := run.Complete(ctx); err != nil {
+		if err := run.Complete(ctx, diviner.Success); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i, run := range runs {
-		trial, err := run.Trial(ctx)
+		metrics, err := run.Metrics(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if run.State() != diviner.Complete {
+		if run.State() != diviner.Success {
 			t.Error("wanted complete")
 		}
-		if got, want := trial.Metrics["acc"], float64(i); got != want {
+		if got, want := metrics["acc"], float64(i); got != want {
 			t.Errorf("got %v, want %v", got, want)
 		}
 	}

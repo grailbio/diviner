@@ -19,6 +19,7 @@ import (
 	"io/ioutil"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/grailbio/diviner"
 	bolt "go.etcd.io/bbolt"
@@ -27,9 +28,6 @@ import (
 var (
 	// ErrNoSuchRun is returned when the requested run does not exist.
 	ErrNoSuchRun = errors.New("no such run")
-	// ErrIncompleteRun is returned when the requested run was not yet
-	// completed.
-	ErrIncompleteRun = errors.New("incomplete run")
 	// ErrInvalidRunId is returned when an invalid run ID was provided.
 	ErrInvalidRunId = errors.New("invalid run ID")
 	// ErrNoSuchStudy is returned when the requested study does not
@@ -45,13 +43,25 @@ var (
 	metricsKey = []byte("metrics")
 )
 
+// RunKey uniquely identifies a run as stored by the DB.
+type runKey struct {
+	study string
+	seq   uint64
+}
+
 // DB implements diviner.Database using Bolt.
-type DB struct{ db *bolt.DB }
+type DB struct {
+	db *bolt.DB
+
+	mu sync.Mutex
+	// Live is the set of live runs.
+	live map[runKey]bool
+}
 
 // Open opens and returns a new database with the provided filename.
 // The file is created if it does not already exist.
 func Open(filename string) (db *DB, err error) {
-	db = new(DB)
+	db = &DB{live: make(map[runKey]bool)}
 	db.db, err = bolt.Open(filename, 0666, nil)
 	if err != nil {
 		return nil, err
@@ -65,7 +75,7 @@ func Open(filename string) (db *DB, err error) {
 // New implements diviner.Database.
 func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values) (diviner.Run, error) {
 	run := new(run)
-	return run, d.db.Update(func(tx *bolt.Tx) (e error) {
+	err := d.db.Update(func(tx *bolt.Tx) (e error) {
 		b := tx.Bucket(studiesKey).Bucket([]byte(study.Name))
 		if b == nil {
 			var err error
@@ -82,13 +92,20 @@ func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values
 		}
 		run.Seq, _ = b.NextSequence()
 		run.Study = study.Name
-		run.Values = values
+		run.RunValues = values
 		run.init(d.db)
 		if _, err = b.CreateBucketIfNotExists(run.seq()); err != nil {
 			return err
 		}
 		return run.marshal(tx)
 	})
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	d.live[runKey{run.Study, run.Seq}] = true
+	d.mu.Unlock()
+	return run, nil
 }
 
 // Run implements diviner.Database.
@@ -120,6 +137,8 @@ func (d *DB) Runs(ctx context.Context, study diviner.Study, states diviner.RunSt
 		if b == nil {
 			return nil
 		}
+		d.mu.Lock()
+		defer d.mu.Unlock()
 		return b.ForEach(func(k, v []byte) error {
 			run := &run{
 				Seq:   seq(k),
@@ -129,7 +148,9 @@ func (d *DB) Runs(ctx context.Context, study diviner.Study, states diviner.RunSt
 			if err := run.unmarshal(tx); err != nil {
 				return err
 			}
-			if state := run.State(); state&states == state {
+			// If we are querying for pending runs, they must be in the liveset;
+			// otherwise they are orphaned.
+			if state := run.State(); state&states == state && (state != diviner.Pending || d.live[runKey{run.Study, run.Seq}]) {
 				runs = append(runs, run)
 			}
 			return nil
@@ -140,19 +161,22 @@ func (d *DB) Runs(ctx context.Context, study diviner.Study, states diviner.RunSt
 
 // A run represents a single Diviner run. It implements diviner.Run.
 type run struct {
-	Seq      uint64
-	Study    string
-	Values   diviner.Values
-	RunState diviner.RunState
+	Seq       uint64
+	Study     string
+	RunValues diviner.Values
+	RunState  diviner.RunState
 
 	db *bolt.DB
 	wr *bufio.Writer
+
+	mu     sync.Mutex
+	status string
 }
 
 // Equal compares two *runs for testing purposes.
 func (r *run) Equal(u diviner.Run) bool {
 	ru := u.(*run)
-	return r.Seq == ru.Seq && r.Study == ru.Study && r.Values.Equal(ru.Values) && r.RunState == ru.RunState
+	return r.Seq == ru.Seq && r.Study == ru.Study && r.RunValues.Equal(ru.RunValues) && r.RunState == ru.RunState
 }
 
 func (r *run) init(db *bolt.DB) {
@@ -232,9 +256,28 @@ func (r *run) Update(ctx context.Context, metrics diviner.Metrics) error {
 	})
 }
 
-// Trial implements diviner.Run.
-func (r *run) Trial(ctx context.Context) (trial diviner.Trial, err error) {
-	trial.Values = r.Values
+// SetStatus implements diviner.Run.
+func (r *run) SetStatus(ctx context.Context, status string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.status = status
+	return nil
+}
+
+// Status implements diviner.Run.
+func (r *run) Status(ctx context.Context) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.status, nil
+}
+
+// Values implements diviner.Run.
+func (r *run) Values() diviner.Values {
+	return r.RunValues
+}
+
+// Metrics implements diviner.Run.
+func (r *run) Metrics(ctx context.Context) (metrics diviner.Metrics, err error) {
 	err = r.db.View(func(tx *bolt.Tx) error {
 		b, err := r.bucket(tx, nil)
 		if err != nil {
@@ -242,23 +285,20 @@ func (r *run) Trial(ctx context.Context) (trial diviner.Trial, err error) {
 		}
 		b = b.Bucket(metricsKey)
 		if b == nil {
-			return ErrIncompleteRun
+			return nil
 		}
 		seq := b.Sequence()
-		ok, err := get(b, seq, &trial.Metrics)
-		if err == nil && !ok {
-			err = ErrIncompleteRun
-		}
+		_, err = get(b, seq, &metrics)
 		return err
 	})
 	return
 }
 
 // Complete implements diviner.Run.
-func (r *run) Complete(ctx context.Context) error {
+func (r *run) Complete(ctx context.Context, state diviner.RunState) error {
 	return r.db.Update(func(tx *bolt.Tx) error {
 		save := r.RunState
-		r.RunState = diviner.Complete
+		r.RunState = state
 		err := r.marshal(tx)
 		if err != nil {
 			r.RunState = save

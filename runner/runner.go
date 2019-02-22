@@ -152,14 +152,15 @@ func (r *Runner) Counters() map[string]int {
 func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	complete, err := r.db.Runs(ctx, r.study, diviner.Complete)
-	if err != nil && err != localdb.ErrNoSuchStudy { // XXX
+	complete, err := r.db.Runs(ctx, r.study, diviner.Success)
+	if err != nil && err != localdb.ErrNoSuchStudy {
 		return false, err
 	}
 	trials := make([]diviner.Trial, len(complete))
 	for i, run := range complete {
+		trials[i].Values = run.Values()
 		var err error
-		trials[i], err = run.Trial(ctx)
+		trials[i].Metrics, err = run.Metrics(ctx)
 		if err != nil {
 			return false, err
 		}
@@ -310,18 +311,19 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 			s, m := run.Status()
 			log.Printf("run %s: %s %s", run, s, m)
 			ndone++
+			state := diviner.Failure
 			switch status, message := run.Status(); status {
 			case statusWaiting, statusRunning:
 				log.Error.Printf("run %s returned with incomplete status %s", run, status)
 			case statusOk:
-				// TODO(marius): store failure state in the database, too.
-				if err := run.Complete(ctx); err != nil {
-					log.Error.Printf("failed to complete run %s: %v", run, err)
-					nfail++
-				}
+				state = diviner.Success
 			case statusErr:
 				nfail++
 				log.Error.Printf("run %s error: %v", run, message)
+			}
+			if err := run.Complete(ctx, state); err != nil {
+				log.Error.Printf("failed to complete run %s: %v", run, err)
+				nfail++
 			}
 		}
 	}

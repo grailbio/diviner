@@ -15,10 +15,31 @@ type RunState int
 const (
 	// Pending indicates that the run has not yet completed.
 	Pending RunState = 1 << iota
-	// Complete indicates that the run has completed and represents
+	// Success indicates that the run has completed and represents
 	// a successful trial.
-	Complete
+	Success
+	// Failure indicates that the run failed.
+	Failure
+
+	// Any contains all run states.
+	Any = Pending | Success | Failure
 )
+
+// String returns a simple textual representation of a run state.
+func (s RunState) String() string {
+	switch s {
+	case 0:
+		return "unknown"
+	case Pending:
+		return "pending"
+	case Success:
+		return "success"
+	case Failure:
+		return "failure"
+	default:
+		return "INVALID"
+	}
+}
 
 // A Run is a single run, which may either be ongoing (state pending) or
 // complete (in which case a Trial may be derived from it).
@@ -38,11 +59,22 @@ type Run interface {
 	// last metric before the run has completed is taken as the
 	// run's final output.
 	Update(ctx context.Context, metrics Metrics) error
-	// Trial returns a trial for this run.
-	Trial(ctx context.Context) (trial Trial, err error)
+	// SetStatus sets the run's current status, used for informational
+	// and diagnostic purposes.
+	SetStatus(ctx context.Context, message string) error
+	// Status
+	Status(ctx context.Context) (string, error)
+	// Values returns the values that are computed by this run.
+	Values() Values
+	// Metrics returns the most recent metrics for this run. If the
+	// run's state is Success, then these metrics are the final trial
+	// metrics. Empty metrics are returned if no metrics have been
+	// reported.
+	Metrics(ctx context.Context) (Metrics, error)
 	// Complete is called when the run has completed and no more
-	// metrics or logs will be reported.
-	Complete(ctx context.Context) error
+	// metrics or logs will be reported. The run is marked as the given state
+	// (which cannot be Pending).
+	Complete(ctx context.Context, state RunState) error
 	// Log returns a reader from which the run's log messages may
 	// be read from persistent storage.
 	Log() io.Reader

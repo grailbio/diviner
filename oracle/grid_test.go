@@ -19,7 +19,8 @@ func TestGridSearch(t *testing.T) {
 		"z": diviner.NewDiscrete(diviner.String("a"), diviner.String("b")),
 	}
 
-	values, err := oracle.GridSearch.Next(nil, params, diviner.Objective{}, -1)
+	gs := &oracle.GridSearch{}
+	values, err := gs.Next(nil, params, diviner.Objective{}, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +52,7 @@ func TestGridSearch(t *testing.T) {
 	for i := range trials {
 		trials[i].Values = values[i]
 	}
-	next, err := oracle.GridSearch.Next(trials, params, diviner.Objective{}, -1)
+	next, err := gs.Next(trials, params, diviner.Objective{}, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +60,7 @@ func TestGridSearch(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 
-	next, err = oracle.GridSearch.Next(trials[3:], params, diviner.Objective{}, -1)
+	next, err = gs.Next(trials[3:], params, diviner.Objective{}, -1)
 	if err != nil {
 		t.Fatal(err)
 	}

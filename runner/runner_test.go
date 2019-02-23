@@ -66,7 +66,7 @@ func TestRunner(t *testing.T) {
 			}
 		},
 		Objective: diviner.Objective{diviner.Maximize, "acc"},
-		Oracle:    oracle.GridSearch,
+		Oracle:    &oracle.GridSearch{},
 	}
 	r := runner.New(study, db)
 	ctx := context.Background()
@@ -148,7 +148,7 @@ func TestRunnerError(t *testing.T) {
 			return config
 		},
 		Objective: diviner.Objective{diviner.Maximize, "acc"},
-		Oracle:    oracle.GridSearch,
+		Oracle:   & oracle.GridSearch{},
 	}
 
 	r := runner.New(study, db)

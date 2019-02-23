@@ -7,6 +7,7 @@
 package oracle
 
 import (
+	"encoding/gob"
 	"fmt"
 	"sort"
 
@@ -21,14 +22,19 @@ func (f Func) Next(previous []diviner.Trial, params diviner.Params, objective di
 	return f(previous, params, objective, howmany)
 }
 
+func init() {
+	gob.Register(&GridSearch{})
+}
+
+type GridSearch struct{}
+
 // GridSearch is an oracle that performs grid searching [1]. It currently
 // supports only discrete parameters, and returns errors if continuous
 // parameters are encountered. GridSearch is deterministic, always
 // returning parameters in the same order.
 //
 // [1] https://en.wikipedia.org/wiki/Hyperparameter_optimization
-var GridSearch = Func(func(
-	previous []diviner.Trial,
+func (_ *GridSearch) Next(previous []diviner.Trial,
 	params diviner.Params, objective diviner.Objective,
 	howmany int) ([]diviner.Values, error) {
 	var (
@@ -101,4 +107,4 @@ var GridSearch = Func(func(
 		}
 	}
 	return values, nil
-})
+}

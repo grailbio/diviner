@@ -514,7 +514,9 @@ func (r *run) flush(events []*cloudwatchlogs.InputLogEvent) error {
 }
 
 func (r *run) streamKeys() (group, stream string) {
-	return fmt.Sprintf("%s/%s", r.table, r.studyName), fmt.Sprint(r.seq)
+	studyName := strings.Replace(r.studyName, ",", "/", -1)
+	studyName = strings.Replace(studyName, "=", "_", -1)
+	return fmt.Sprintf("%s/%s", r.table, studyName), fmt.Sprint(r.seq)
 }
 
 func (r *run) key() map[string]*dynamodb.AttributeValue {

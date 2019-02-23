@@ -143,7 +143,7 @@ func Load(filename string, src interface{}) ([]diviner.Study, Config, error) {
 		"dataset":     starlark.NewBuiltin("dataset", makeDataset),
 		"run_config":  starlark.NewBuiltin("run_config", makeRunConfig),
 		"study":       starlark.NewBuiltin("study", makeStudy),
-		"grid_search": &oracleValue{oracle.GridSearch},
+		"grid_search": &oracleValue{&oracle.GridSearch{}},
 		"skopt":       starlark.NewBuiltin("skopt", makeSkopt),
 		"config":      starlark.NewBuiltin("config", makeConfig),
 		"localsystem": starlark.NewBuiltin("localsystem", makeLocalSystem),

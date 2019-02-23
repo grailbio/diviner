@@ -305,7 +305,7 @@ func run(db diviner.Database, study diviner.Study, args []string) {
 	}
 	ctx := context.Background()
 	if study.Oracle == nil {
-		study.Oracle = oracle.GridSearch
+		study.Oracle = &oracle.GridSearch{}
 	}
 	go func() {
 		err := http.ListenAndServe(*httpaddr, nil)

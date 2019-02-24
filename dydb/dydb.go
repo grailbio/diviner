@@ -443,12 +443,12 @@ func (r *run) flushLoop() {
 				if n < 0 {
 					break
 				}
-				if n == 0 {
-					continue
-				}
 				line, err := buf.ReadString('\n')
 				if err != nil {
 					panic(err)
+				}
+				if strings.TrimSpace(line) == "" {
+					continue
 				}
 				events = append(events, &cloudwatchlogs.InputLogEvent{
 					Timestamp: aws.Int64(time.Now().UnixNano() / 1000000),
@@ -493,6 +493,7 @@ func (r *run) flush(events []*cloudwatchlogs.InputLogEvent) error {
 				return err
 			}
 		}
+		log.Printf("dydb: created cloudwatch stream, group %s, name %s", group, stream)
 		r.logs = client
 		return nil
 	})
@@ -506,7 +507,15 @@ func (r *run) flush(events []*cloudwatchlogs.InputLogEvent) error {
 		SequenceToken: r.logsSeq,
 	})
 	if err != nil {
-		log.Error.Printf("CloudWatchLogs.PutLogEvent: %v", err)
+		var seq string
+		if r.logsSeq != nil {
+			seq = *r.logsSeq
+		}
+		log.Error.Printf("CloudWatchLogs.PutLogEvent(seq: %v): %v", seq, err)
+		// Clear the sequence, in case the error is due to missynchronized sequence
+		// tokens.  This could happens when two diviner instances are writing to the
+		// same stream due to external race.
+		r.logsSeq = nil
 	} else {
 		r.logsSeq = out.NextSequenceToken
 	}

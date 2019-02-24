@@ -22,7 +22,7 @@ func TestDB(t *testing.T) {
 	dir, cleanup := testutil.TempDir(t, "", "")
 	defer cleanup()
 	ctx := context.Background()
-	const N = 1000
+	const N = 100
 
 	db, err := localdb.Open(filepath.Join(dir, "test.ddb"))
 	if err != nil {

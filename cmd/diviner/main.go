@@ -179,6 +179,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/grailbio/base/log"
+	"github.com/grailbio/base/traverse"
 	"github.com/grailbio/base/tsv"
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/bigmachine/ec2system"
@@ -470,14 +471,19 @@ func ps(db diviner.Database, studies []diviner.Study, args []string) {
 		log.Printf("no studies")
 		return
 	}
-	for _, study := range studies {
-		runs, err := db.Runs(ctx, study, diviner.Pending)
-		if err != nil {
-			log.Fatal(err)
-		}
+	runs := make([][]diviner.Run, len(studies))
+	err := traverse.Each(len(runs), func(i int) (err error) {
+		runs[i], err = db.Runs(ctx, studies[i], diviner.Pending)
+		return
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	for i, runs := range runs {
 		if len(runs) == 0 {
 			continue
 		}
+		study := studies[i]
 		fmt.Printf("study %s: %s\n", study.Name, study.Params)
 		sorted := make([]string, 0, len(study.Params))
 		for key := range study.Params {

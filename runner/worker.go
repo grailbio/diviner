@@ -215,7 +215,7 @@ func (c *commandService) Reset(ctx context.Context, _ struct{}, _ *struct{}) err
 
 // WriteFile writes the provided file into the workspace.
 func (c *commandService) WriteFile(ctx context.Context, file fileLiteral, _ *struct{}) error {
-	return ioutil.WriteFile(filepath.Join(c.dir, file.Name), file.Contents, 0644)
+	return ioutil.WriteFile(filepath.Join(c.dir, filepath.Base(file.Name)), file.Contents, 0644)
 }
 
 // Run runs a command in the workspace. Its standard output and error are

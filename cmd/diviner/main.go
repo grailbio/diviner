@@ -336,7 +336,7 @@ func run(db diviner.Database, studies []diviner.Study, args []string) {
 	switch flags.NArg() {
 	case 0: // all studies
 	case 1:
-		match(&studies, flag.Arg(0))
+		match(&studies, flags.Arg(0))
 	default:
 		flags.Usage()
 		os.Exit(2)

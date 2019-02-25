@@ -68,9 +68,15 @@ func TestRunner(t *testing.T) {
 		Objective: diviner.Objective{diviner.Maximize, "acc"},
 		Oracle:    &oracle.GridSearch{},
 	}
-	r := runner.New(study, db)
-	ctx := context.Background()
-	done, err := r.Do(ctx, 0)
+	r := runner.New(db)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		if err := r.Loop(ctx); err != context.Canceled {
+			t.Fatal(err)
+		}
+	}()
+	done, err := r.Round(ctx, study, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +112,7 @@ func TestRunner(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 
-	r.Cancel()
+	cancel()
 	// Make sure the machines are stopped.
 	for _, m := range test.B().Machines() {
 		if !eventually(func() bool { return m.Err() != nil }) {
@@ -148,24 +154,23 @@ func TestRunnerError(t *testing.T) {
 			return config
 		},
 		Objective: diviner.Objective{diviner.Maximize, "acc"},
-		Oracle:   & oracle.GridSearch{},
+		Oracle:    &oracle.GridSearch{},
 	}
 
-	r := runner.New(study, db)
-	ctx := context.Background()
-	done, err := r.Do(ctx, 0)
+	r := runner.New(db)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		if err := r.Loop(ctx); err != context.Canceled {
+			t.Fatal(err)
+		}
+	}()
+	done, err := r.Round(ctx, study, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if done {
 		t.Error("should not be done")
-	}
-	counters := r.Counters()
-	if got, want := counters["ndone"], 2; got != want {
-		t.Errorf("got %v, want %v", got, want)
-	}
-	if got, want := counters["nfail"], 2; got != want {
-		t.Errorf("got %v, want %v", got, want)
 	}
 	runs, err := db.Runs(ctx, study, diviner.Success)
 	if err != nil {

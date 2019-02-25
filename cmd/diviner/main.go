@@ -128,7 +128,8 @@
 //
 // Usage:
 //	diviner config.dv list
-//	diviner config.dv run study [-rounds M] [-trials N]
+//	diviner config.dv run [-rounds M] [-trials N]
+//	diviner config.dv run regexp [-rounds M] [-trials N]
 //	diviner config.dv summarize study
 //	diviner config.dv ps
 //	diviner config.dv ps studies...
@@ -137,10 +138,11 @@
 // diviner config.dv list lists the studies provided by the
 // configuration config.dv.
 //
-// diviner config.dv run study  [-rounds M] [-trials N] conducts M
-// rounds (default 1) of N trials of the named study as configured in
-// config.dv. If N not provided, then all trails are run, as long as
-// the set of trials are finite.
+// diviner config.dv run regexp  [-rounds M] [-trials N] conducts M
+// rounds (default 1) of N trials of all studies matching the
+// provided regexp, as configured in config.dv. If N not provided,
+// then all trials are run, as long as the set of trials are finite. If the regular
+// expression is omitted, it matches all studies.
 //
 // diviner config.dv summarize study summarizes the named study; it
 // outputs a TSV of all known completed trials, specifying parameter
@@ -173,8 +175,10 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"text/tabwriter"
 
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -195,8 +199,10 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
 	diviner config.dv list
 		List studies available in the provided configuration.
-	diviner config.dv run study [-rounds M] [-trials N]
-		Run M rounds of N trials of the given study.
+	diviner config.dv run [-rounds M] [-trials N]
+	diviner config.dv run regexp [-rounds M] [-trials N]
+		Run M rounds of N trials of the studies matching regexp.
+		All studies are run if the regexp is omitted.
 	diviner config.dv summarize study
 		Summarizes the known set of trials in the provided study.
 	diviner config.dv ps
@@ -255,11 +261,7 @@ func main() {
 			fmt.Println(study.Name)
 		}
 	case "run":
-		if flag.NArg() < 3 {
-			flag.Usage()
-		}
-		study := find(studies, flag.Arg(2))
-		run(database, study, flag.Args()[3:])
+		run(database, studies, flag.Args()[2:])
 	case "summarize":
 		if flag.NArg() < 3 {
 			flag.Usage()
@@ -287,12 +289,30 @@ func find(studies []diviner.Study, name string) diviner.Study {
 			return study
 		}
 	}
-	fmt.Fprintf(os.Stderr, "study %s not defined in config %s", name, flag.Arg(0))
+	fmt.Fprintf(os.Stderr, "study %s not defined in config %s\n", name, flag.Arg(0))
 	os.Exit(2)
 	panic("not reached")
 }
 
-func run(db diviner.Database, study diviner.Study, args []string) {
+func match(studies *[]diviner.Study, pat string) {
+	r, err := regexp.Compile(pat)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var n int
+	for _, study := range *studies {
+		if r.MatchString(study.Name) {
+			(*studies)[n] = study
+			n++
+		}
+	}
+	if n == 0 {
+		log.Fatalf("no studies matched %s", r)
+	}
+	*studies = (*studies)[:n]
+}
+
+func run(db diviner.Database, studies []diviner.Study, args []string) {
 	var (
 		flags   = flag.NewFlagSet("run", flag.ExitOnError)
 		ntrials = flags.Int("trials", 0, "number of trials to run in each round")
@@ -301,37 +321,69 @@ func run(db diviner.Database, study diviner.Study, args []string) {
 	if err := flags.Parse(args); err != nil {
 		log.Fatal(err)
 	}
-	if flags.NArg() != 0 {
-		flag.Usage()
+	switch flags.NArg() {
+	case 0: // all studies
+	case 1:
+		match(&studies, flag.Arg(0))
+	default:
+		flags.Usage()
+		os.Exit(2)
 	}
-	ctx := context.Background()
-	if study.Oracle == nil {
-		study.Oracle = &oracle.GridSearch{}
-	}
+
 	go func() {
 		err := http.ListenAndServe(*httpaddr, nil)
 		log.Error.Printf("failed to start diagnostic http server: %v", err)
 	}()
-
-	runner := runner.New(study, db)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runner := runner.New(db)
+	go func() {
+		if err := runner.Loop(ctx); err != context.Canceled {
+			log.Fatal(err)
+		}
+	}()
 	expvar.Publish("diviner", expvar.Func(func() interface{} { return runner.Counters() }))
-	http.Handle("/status", runner)
+	http.Handle("/", runner)
 
+	names := make([]string, len(studies))
+	for i, study := range studies {
+		names[i] = study.Name
+	}
+	log.Printf("performing trials for studies: %s", strings.Join(names, ", "))
+
+	var nerr uint32
+	_ = traverse.Each(len(studies), func(i int) error {
+		if err := runStudy(ctx, runner, studies[i], *ntrials, *nrounds); err != nil {
+			atomic.AddUint32(&nerr, 1)
+			log.Error.Printf("study %v failed: %v", studies[i], err)
+		}
+		return nil
+	})
+	if nerr > 0 {
+		os.Exit(1)
+	}
+}
+
+func runStudy(ctx context.Context, runner *runner.Runner, study diviner.Study, ntrials, nrounds int) error {
+	if study.Oracle == nil {
+		study.Oracle = &oracle.GridSearch{}
+	}
 	var (
 		round int
 		done  bool
 	)
-	for ; !done && round < *nrounds; round++ {
-		log.Printf("starting %d trials in round %d/%d", *ntrials, round, *nrounds)
+	for ; !done && round < nrounds; round++ {
+		log.Printf("%s: starting %d trials in round %d/%d", study.Name, ntrials, round, nrounds)
 		var err error
-		done, err = runner.Do(ctx, *ntrials)
+		done, err = runner.Round(ctx, study, ntrials)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 	}
 	if done {
-		log.Printf("study %s complete after %d rounds", study.Name, round)
+		log.Printf("%s: study complete after %d rounds", study.Name, round)
 	}
+	return nil
 }
 
 func summarize(db diviner.Database, study diviner.Study, args []string) {

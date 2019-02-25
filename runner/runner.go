@@ -8,6 +8,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/grailbio/base/log"
+	"github.com/grailbio/base/traverse"
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/diviner"
 	"github.com/grailbio/diviner/localdb"
@@ -33,40 +35,38 @@ const idleTime = time.Minute
 //
 // Runner is also an http.Handler that prints trial statuses.
 type Runner struct {
-	study diviner.Study
-	db    diviner.Database
+	db diviner.Database
 
 	requestc chan *request
 
 	// Time is the timestamp of runner.
 	time time.Time
 
-	// Sessions stores the current set of bigmachine
-	// sessions maintained by the runner, keyed by the
-	// diviner system represented by the session.
-	sessions map[*diviner.System]*session
+	ctx    context.Context
+	cancel func()
 
 	mu       sync.Mutex
 	counters map[string]int
-	runs     []*run
+	// Runs maps study names to the list of runs for this study.
+	runs     map[string][]*run
 	datasets map[string]*dataset
 
 	nrun int
 }
 
-// New returns a new runner that will perform trials for the provided study,
-// recording its results to the provided database. The runner uses bigmachine
-// to create new systems according to the run configurations returned from
-// the study.
-func New(study diviner.Study, db diviner.Database) *Runner {
+// New returns a new runner that will perform trials, recording its
+// results to the provided database. The runner uses bigmachine to
+// create new systems according to the run configurations returned
+// from the study. The caller must start the runner's run loop by
+// calling Do.
+func New(db diviner.Database) *Runner {
 	return &Runner{
-		study:    study,
 		db:       db,
-		sessions: make(map[*diviner.System]*session),
 		time:     time.Now(),
 		counters: make(map[string]int),
 		requestc: make(chan *request),
 		datasets: make(map[string]*dataset),
+		runs:     make(map[string][]*run),
 	}
 }
 
@@ -76,56 +76,79 @@ func (r *Runner) StartTime() time.Time {
 }
 
 // ServeHTTP implements http.Handler, providing a simple status page used
-// to examine the currently running trials.
+// to examine the currently running trials, organized by study.
 func (r *Runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	sorted := make([]string, 0, len(r.study.Params))
-	for key := range r.study.Params {
-		sorted = append(sorted, key)
-	}
-	sort.Strings(sorted)
-	var tw tabwriter.Writer
-	tw.Init(w, 4, 4, 1, ' ', 0)
-	io.WriteString(&tw, "id\t")
-	io.WriteString(&tw, strings.Join(sorted, "\t"))
-	fmt.Fprintln(&tw, "\tmetrics\tstatus")
-
-	// TODO(marius): allow the user to pass in sort arguments, so that
-	// the status page can serve as a scoreboard.
-	row := make([]string, len(sorted)+4)
+	var buf bytes.Buffer // so we don't hold the lock while waiting for clients
 	r.mu.Lock()
-	runs := r.runs
-	r.mu.Unlock()
-	for _, run := range runs {
-		row[0] = fmt.Sprint(run.ID())
-		for i, key := range sorted {
-			if v, ok := run.Values[key]; ok {
-				row[i+1] = v.String()
-			} else {
-				row[i+1] = "NA"
-			}
+	names := make([]string, 0, len(r.runs))
+	for name := range r.runs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if len(r.runs[name]) == 0 {
+			continue
 		}
-		status, message := run.Status()
-		if metrics := run.Metrics(); len(metrics) > 0 {
-			keys := make([]string, 0, len(metrics))
-			for key := range metrics {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			elems := make([]string, len(keys))
-			for i, key := range keys {
-				elems[i] = fmt.Sprintf("%s=%f", key, metrics[key])
-			}
-			row[len(row)-3] = strings.Join(elems, ",")
-		} else {
-			row[len(row)-3] = "NA"
+		study := r.runs[name][0].Study
+
+		var tw tabwriter.Writer
+		tw.Init(&buf, 4, 4, 1, ' ', 0)
+
+		fmt.Fprintf(&tw, "study %s:\n", study.Name)
+		fmt.Fprintln(&tw, "\tparams:")
+		for _, param := range study.Params.Sorted() {
+			fmt.Fprintf(&tw, "\t\t%s:\t%s\n", param.Name, param)
 		}
 
-		row[len(row)-2] = status.String()
-		row[len(row)-1] = message
-		io.WriteString(&tw, strings.Join(row, "\t"))
-		fmt.Fprintln(&tw)
+		fmt.Fprint(&tw, "\ttrials:\t")
+		sorted := make([]string, 0, len(study.Params))
+		for key := range study.Params {
+			sorted = append(sorted, key)
+		}
+		sort.Strings(sorted)
+		io.WriteString(&tw, "id\t")
+		io.WriteString(&tw, strings.Join(sorted, "\t"))
+		fmt.Fprintln(&tw, "\tmetrics\tstatus")
+
+		// TODO(marius): allow the user to pass in sort arguments, so that
+		// the status page can serve as a scoreboard.
+		row := make([]string, len(sorted)+4)
+
+		for _, run := range r.runs[name] {
+			row[0] = fmt.Sprint(run.ID())
+			for i, key := range sorted {
+				if v, ok := run.Values[key]; ok {
+					row[i+1] = v.String()
+				} else {
+					row[i+1] = "NA"
+				}
+			}
+			status, message := run.Status()
+			if metrics := run.Metrics(); len(metrics) > 0 {
+				keys := make([]string, 0, len(metrics))
+				for key := range metrics {
+					keys = append(keys, key)
+				}
+				sort.Strings(keys)
+				elems := make([]string, len(keys))
+				for i, key := range keys {
+					elems[i] = fmt.Sprintf("%s=%f", key, metrics[key])
+				}
+				row[len(row)-3] = strings.Join(elems, ",")
+			} else {
+				row[len(row)-3] = "NA"
+			}
+
+			row[len(row)-2] = status.String()
+			row[len(row)-1] = message
+			io.WriteString(&tw, "\t\t\t")
+			io.WriteString(&tw, strings.Join(row, "\t"))
+			fmt.Fprintln(&tw)
+		}
+		tw.Flush()
 	}
-	tw.Flush()
+	r.mu.Unlock()
+	_, _ = io.Copy(w, &buf)
 }
 
 // Counters returns a set of runtime counters from this runner's Do loop.
@@ -139,94 +162,38 @@ func (r *Runner) Counters() map[string]int {
 	return counters
 }
 
-// Do performs a single round of a study; at most ntrials. If
-// ntrials is 0, then Do performs all trials returned by the study's
-// oracle. Results are reported to the database as they are returned,
-// and the runner's status page is updated continually with the
-// latest available run metrics.
-//
-// Do does not perform retries for failed trials. Do should not be
-// invoked concurrently.
+// Loop is the runner's main run loop, managing clusters of machines
+// and allocating workers among the runs. The runner stops doing work
+// when the provided context is canceled. All errors are fatal: the
+// runner may not be revived.
 //
 // BUG(marius): the runner should re-create failed machines.
-func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	complete, err := r.db.Runs(ctx, r.study, diviner.Success)
-	if err != nil && err != localdb.ErrNoSuchStudy {
-		return false, err
-	}
-	trials := make([]diviner.Trial, len(complete))
-	for i, run := range complete {
-		trials[i].Values = run.Values()
-		var err error
-		trials[i].Metrics, err = run.Metrics(ctx)
-		if err != nil {
-			return false, err
-		}
-	}
-	log.Printf("requesting new points from oracle from %d trials", len(trials))
-	values, err := r.study.Oracle.Next(trials, r.study.Params, r.study.Objective, ntrials)
-	if err != nil {
-		return false, err
-	}
-	if len(values) == 0 {
-		return true, nil
-	}
-	runs := make([]*run, len(values))
-	for i := range values {
-		runs[i] = new(run)
-		runs[i].Run, err = r.db.New(ctx, r.study, values[i])
-		if err != nil {
-			return false, err
-		}
-		runs[i].Study = r.study
-		runs[i].Values = values[i]
-		runs[i].Config = r.study.Run(values[i])
-		r.nrun++
-	}
-	r.mu.Lock()
-	r.runs = runs
-	r.mu.Unlock()
-	defer func() {
-		r.mu.Lock()
-		r.runs = nil
-		r.mu.Unlock()
-	}()
-
-	donec := make(chan *run)
-	for _, run := range runs {
-		run := run
-		go func() {
-			run.Do(ctx, r)
-			select {
-			case <-ctx.Done():
-			case donec <- run:
-			}
-		}()
-	}
-
+func (r *Runner) Loop(ctx context.Context) error {
 	var (
-		workerc                = make(chan *worker)
 		tick                   = time.NewTicker(10 * time.Second)
 		nworker                int
 		ndone, nfail, nstarted int
+		workerc                = make(chan *worker)
+
+		// Sessions stores the current set of bigmachine
+		// sessions maintained by the runner, keyed by the
+		// diviner system represented by the session.
+		sessions = make(map[*diviner.System]*session)
 	)
-	for _, sess := range r.sessions {
-		nworker += len(sess.Idle)
-	}
-	r.mu.Lock()
-	snapshot := make(map[string]int)
-	for k, v := range r.counters {
-		snapshot[k] = v
-	}
-	r.mu.Unlock()
+	defer func() {
+		for _, sess := range sessions {
+			for _, w := range sess.Idle {
+				w.Cancel()
+			}
+			sess.Idle = nil
+		}
+	}()
 	updateCounters := func() {
 		r.mu.Lock()
 		r.counters["nworker"] = nworker
-		r.counters["ndone"] = snapshot["ndone"] + ndone
-		r.counters["nfail"] = snapshot["nfail"] + nfail
-		r.counters["nstarted"] = snapshot["nstarted"] + nstarted
+		r.counters["ndone"] = ndone
+		r.counters["nfail"] = nfail
+		r.counters["nstarted"] = nstarted
 		r.mu.Unlock()
 	}
 	reply := func(r *request, w *worker) {
@@ -235,13 +202,13 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 		case r.replyc <- w:
 		}
 	}
-	for ndone < len(runs) {
+	for {
 		updateCounters()
 		select {
 		case <-ctx.Done():
-			return false, ctx.Err()
+			return ctx.Err()
 		case <-tick.C:
-			for _, sess := range r.sessions {
+			for _, sess := range sessions {
 				for len(sess.Idle) > 0 && time.Since(sess.Idle[0].IdleTime) > idleTime {
 					var w *worker
 					w, sess.Idle = sess.Idle[0], sess.Idle[1:]
@@ -252,26 +219,22 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 				}
 			}
 		case req := <-r.requestc:
-			sess, ok := r.sessions[req.sys]
+			sess, ok := sessions[req.sys]
 			if !ok {
 				sess = &session{System: req.sys}
 				var err error
 				sess.B = bigmachine.Start(req.sys)
 				if err != nil {
-					return false, fmt.Errorf("failed to create session for system %s: %v", req.sys, err)
+					return fmt.Errorf("failed to create session for system %s: %v", req.sys, err)
 				}
 				if sess.Name() != "testsystem" {
 					sess.HandleDebugPrefix("/debug/"+sess.ID+"/", http.DefaultServeMux)
 				}
-				r.sessions[req.sys] = sess
+				sessions[req.sys] = sess
 			}
 			if len(sess.Idle) > 0 {
-				// Make sure that we attempt to return the worker on the correct
-				// channel, e.g., if this idle worker was carried over from a previous
-				// run.
 				var w *worker
 				w, sess.Idle = sess.Idle[0], sess.Idle[1:]
-				w.returnc = workerc
 				go reply(req, w)
 				break
 			}
@@ -307,37 +270,86 @@ func (r *Runner) Do(ctx context.Context, ntrials int) (done bool, err error) {
 			// runs starting.
 			w.IdleTime = time.Now()
 			sess.Idle = append(sess.Idle, w)
-		case run := <-donec:
-			s, m := run.Status()
-			log.Printf("run %s: %s %s", run, s, m)
-			ndone++
-			state := diviner.Failure
-			switch status, message := run.Status(); status {
-			case statusWaiting, statusRunning:
-				log.Error.Printf("run %s returned with incomplete status %s", run, status)
-			case statusOk:
-				state = diviner.Success
-			case statusErr:
-				nfail++
-				log.Error.Printf("run %s error: %v", run, message)
-			}
-			if err := run.Complete(ctx, state); err != nil {
-				log.Error.Printf("failed to complete run %s: %v", run, err)
-				nfail++
-			}
 		}
 	}
 	updateCounters()
-	return nfail == 0 && (ntrials == 0 || len(runs) < ntrials), nil
+	return nil
 }
 
-func (r *Runner) Cancel() {
-	for _, sess := range r.sessions {
-		for _, w := range sess.Idle {
-			w.Cancel()
-		}
-		sess.Idle = nil
+// Run performs a single run with the provided study and values. The
+// run is registered in the runner's configured database, and its
+// status is maintained throughout the course of execution. Run
+// returns when the run is complete (its status may be inspected by
+// methods on diviner.Run); all errors are runtime errors, not errors
+// of the run itself. The run is registered with the runner and will
+// show up in the various introspection facilities. Run
+func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Values) (diviner.Run, error) {
+	run := new(run)
+	var err error
+	run.Run, err = r.db.New(ctx, study, values)
+	if err != nil {
+		return nil, err
 	}
+	run.Study = study
+	run.Values = values
+	run.Config = study.Run(values)
+	r.add(run)
+	defer r.remove(run)
+	run.Do(ctx, r)
+	status, message := run.Status()
+	log.Printf("run %s: %s %s", run, status, message)
+	state := diviner.Failure
+	switch status {
+	case statusWaiting, statusRunning:
+		log.Error.Printf("run %s returned with incomplete status %s", run, status)
+	case statusOk:
+		state = diviner.Success
+	case statusErr:
+		log.Error.Printf("run %s error: %v", run, message)
+	}
+	if err := run.Complete(ctx, state); err != nil {
+		log.Error.Printf("failed to complete run %s: %v", run, err)
+		return nil, err
+	}
+	return run.Run, nil
+}
+
+func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (done bool, err error) {
+	complete, err := r.db.Runs(ctx, study, diviner.Success)
+	if err != nil && err != localdb.ErrNoSuchStudy {
+		return false, err
+	}
+	trials := make([]diviner.Trial, len(complete))
+	for i, run := range complete {
+		trials[i].Values = run.Values()
+		var err error
+		trials[i].Metrics, err = run.Metrics(ctx)
+		if err != nil {
+			return false, err
+		}
+	}
+	log.Printf("%s: requesting new points from oracle from %d trials", study.Name, len(trials))
+	values, err := study.Oracle.Next(trials, study.Params, study.Objective, ntrials)
+	if err != nil {
+		return false, err
+	}
+	if len(values) == 0 {
+		return true, nil
+	}
+	runs := make([]diviner.Run, len(values))
+	err = traverse.Each(len(values), func(i int) (err error) {
+		runs[i], err = r.Run(ctx, study, values[i])
+		return
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, run := range runs {
+		if run.State() != diviner.Success {
+			return false, nil
+		}
+	}
+	return ntrials == 0 || (len(runs) < ntrials), nil
 }
 
 // Allocate allocates a new worker and returns it. Workers must
@@ -371,6 +383,27 @@ func (r *Runner) dataset(ctx context.Context, dataset diviner.Dataset) *dataset 
 	r.datasets[d.Name] = d
 	go d.Do(ctx, r)
 	return d
+}
+
+func (r *Runner) add(run *run) {
+	r.mu.Lock()
+	r.runs[run.Study.Name] = append(r.runs[run.Study.Name], run)
+	r.mu.Unlock()
+}
+
+func (r *Runner) remove(run *run) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	runs := r.runs[run.Study.Name]
+	for i := range runs {
+		if runs[i] == run {
+			runs[i] = runs[len(runs)-1]
+			runs = runs[:len(runs)-1]
+			r.runs[run.Study.Name] = runs
+			return
+		}
+	}
+	panic("run not found")
 }
 
 type request struct {

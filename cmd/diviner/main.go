@@ -168,6 +168,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"expvar"
 	"flag"
 	"fmt"
@@ -182,6 +183,8 @@ import (
 	"text/tabwriter"
 
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/grailbio/base/file"
+	"github.com/grailbio/base/file/s3file"
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/base/traverse"
 	"github.com/grailbio/base/tsv"
@@ -194,6 +197,14 @@ import (
 	"github.com/grailbio/diviner/runner"
 	"github.com/grailbio/diviner/script"
 )
+
+func initS3() {
+	file.RegisterImplementation("s3", func() file.Implementation {
+		return s3file.NewImplementation(s3file.NewDefaultProvider(
+			session.Options{}),
+			s3file.Options{})
+	})
+}
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
@@ -220,6 +231,7 @@ Flags:`)
 var httpaddr = flag.String("http", ":6000", "http status address")
 
 func main() {
+	initS3()
 	// This is a temporary hack required to bootstrap worker nodes
 	// without also shipping the run spec.
 	//
@@ -503,10 +515,129 @@ func summarize(db diviner.Database, study diviner.Study, args []string) {
 	}
 }
 
+type studyPrinter interface {
+	Print(ctx context.Context, study diviner.Study, runs []diviner.Run)
+}
+
+type jsonRunPrinter struct{}
+
+func (*jsonRunPrinter) Print(ctx context.Context, study diviner.Study, runs []diviner.Run) {
+	type Run struct {
+		ID           string
+		State        string
+		Status       string
+		Params       map[string]interface{}
+		Metrics      map[string]float64
+		MetricsError string
+	}
+	type Dict struct {
+		Study diviner.Study
+		Runs  []Run
+	}
+	dict := Dict{Study: study}
+	for _, run := range runs {
+		r := Run{ID: run.ID(), Params: map[string]interface{}{}, Metrics: map[string]float64{}}
+		if s, err := run.Status(ctx); err != nil {
+			r.Status = "error: " + err.Error()
+		} else {
+			r.Status = s
+		}
+		r.State = run.State().String()
+		values := run.Values()
+		for key := range study.Params {
+			v, ok := values[key]
+			if !ok {
+				r.Params[key] = nil
+				continue
+			}
+			switch v.Kind() {
+			case diviner.Integer:
+				r.Params[key] = v.Int()
+			case diviner.Real:
+				r.Params[key] = v.Float()
+			case diviner.Str:
+				r.Params[key] = v.Str()
+			default:
+				panic(v)
+			}
+		}
+		if metrics, err := run.Metrics(ctx); err != nil {
+			r.MetricsError = err.Error()
+		} else {
+			r.Metrics = metrics
+		}
+		dict.Runs = append(dict.Runs, r)
+	}
+	e := json.NewEncoder(os.Stdout)
+	e.SetIndent("", "  ")
+	e.Encode(dict)
+}
+
+type tabularRunPrinter struct{}
+
+func (*tabularRunPrinter) Print(ctx context.Context, study diviner.Study, runs []diviner.Run) {
+	fmt.Printf("study %s: %s\n", study.Name, study.Params)
+	sorted := make([]string, 0, len(study.Params))
+	for key := range study.Params {
+		sorted = append(sorted, key)
+	}
+	sort.Strings(sorted)
+	var tw tabwriter.Writer
+	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
+	io.WriteString(&tw, "id\t")
+	io.WriteString(&tw, strings.Join(sorted, "\t"))
+	fmt.Fprintln(&tw, "\tmetrics\tstatus")
+	for _, run := range runs {
+		row := make([]string, len(sorted)+3)
+		row[0] = fmt.Sprint(run.ID())
+		status, err := run.Status(ctx)
+		if err != nil {
+			row[len(row)-1] = err.Error()
+		} else {
+			row[len(row)-1] = status
+		}
+		values := run.Values()
+		for i, key := range sorted {
+			if v, ok := values[key]; ok {
+				row[i+1] = v.String()
+			} else {
+				row[i+1] = "NA"
+			}
+		}
+		if metrics, err := run.Metrics(ctx); err != nil {
+			row[len(row)-2] = err.Error()
+		} else if len(metrics) == 0 {
+			row[len(row)-2] = "NA"
+		} else {
+			keys := make([]string, 0, len(metrics))
+			for key := range metrics {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			elems := make([]string, len(keys))
+			for i, key := range keys {
+				elems[i] = fmt.Sprintf("%s=%f", key, metrics[key])
+			}
+			row[len(row)-2] = strings.Join(elems, ",")
+		}
+		io.WriteString(&tw, strings.Join(row, "\t"))
+		fmt.Fprintln(&tw)
+	}
+	tw.Flush()
+}
+
 func ps(db diviner.Database, studies []diviner.Study, args []string) {
-	if len(args) > 0 {
+	var (
+		flags  = flag.NewFlagSet("run", flag.ExitOnError)
+		any    = flags.Bool("a", false, "show runs with any status, either pending, completed or failed")
+		format = flags.String("format", "tabular", "Output format. \"tabular\" prints in tabular format, \"json\" outputs in JSON.")
+	)
+	if err := flags.Parse(args); err != nil {
+		log.Fatal(err)
+	}
+	if flags.NArg() > 0 {
 		keep := make(map[string]bool)
-		for _, study := range args {
+		for _, study := range flags.Args() {
 			keep[study] = true
 		}
 		var n int
@@ -523,9 +654,22 @@ func ps(db diviner.Database, studies []diviner.Study, args []string) {
 		log.Printf("no studies")
 		return
 	}
+	var printer studyPrinter
+	switch *format {
+	case "tabular":
+		printer = &tabularRunPrinter{}
+	case "json":
+		printer = &jsonRunPrinter{}
+	default:
+		log.Fatalf("invalid output format '%s'", *format)
+	}
 	runs := make([][]diviner.Run, len(studies))
+	status := diviner.Pending
+	if *any {
+		status = diviner.Any
+	}
 	err := traverse.Each(len(runs), func(i int) (err error) {
-		runs[i], err = db.Runs(ctx, studies[i], diviner.Pending)
+		runs[i], err = db.Runs(ctx, studies[i], status)
 		return
 	})
 	if err != nil {
@@ -535,55 +679,7 @@ func ps(db diviner.Database, studies []diviner.Study, args []string) {
 		if len(runs) == 0 {
 			continue
 		}
-		study := studies[i]
-		fmt.Printf("study %s: %s\n", study.Name, study.Params)
-		sorted := make([]string, 0, len(study.Params))
-		for key := range study.Params {
-			sorted = append(sorted, key)
-		}
-		sort.Strings(sorted)
-		var tw tabwriter.Writer
-		tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
-		io.WriteString(&tw, "id\t")
-		io.WriteString(&tw, strings.Join(sorted, "\t"))
-		fmt.Fprintln(&tw, "\tmetrics\tstatus")
-		for _, run := range runs {
-			row := make([]string, len(sorted)+3)
-			row[0] = fmt.Sprint(run.ID())
-			status, err := run.Status(ctx)
-			if err != nil {
-				row[len(row)-1] = err.Error()
-			} else {
-				row[len(row)-1] = status
-			}
-			values := run.Values()
-			for i, key := range sorted {
-				if v, ok := values[key]; ok {
-					row[i+1] = v.String()
-				} else {
-					row[i+1] = "NA"
-				}
-			}
-			if metrics, err := run.Metrics(ctx); err != nil {
-				row[len(row)-2] = err.Error()
-			} else if len(metrics) == 0 {
-				row[len(row)-2] = "NA"
-			} else {
-				keys := make([]string, 0, len(metrics))
-				for key := range metrics {
-					keys = append(keys, key)
-				}
-				sort.Strings(keys)
-				elems := make([]string, len(keys))
-				for i, key := range keys {
-					elems[i] = fmt.Sprintf("%s=%f", key, metrics[key])
-				}
-				row[len(row)-2] = strings.Join(elems, ",")
-			}
-			io.WriteString(&tw, strings.Join(row, "\t"))
-			fmt.Fprintln(&tw)
-		}
-		tw.Flush()
+		printer.Print(ctx, studies[i], runs)
 	}
 }
 

@@ -1,0 +1,15 @@
+local = localsystem("local", 1)
+
+def dummy_study(name):
+    study(name=name.strip(),
+          objective=minimize("x"),
+          params={"p0": discrete(1,2)},
+          run=lambda p: run_config(system=local, script="foo"),
+          oracle=grid_search)
+
+dummy_study(name=command(script="echo foo"))
+dummy_study(name=command(interpreter="python3 -c", script="""print('foo' * 2)"""))
+dummy_study(name=command(interpreter="python3 -c", script="""
+import math
+print(math.sqrt(2))
+"""))

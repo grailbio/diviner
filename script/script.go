@@ -93,6 +93,14 @@
 //		                    one of "sampling", "lgbfs" (by default it is automatically
 //		                    selected).
 //
+//  command(script, interpreter?="bash -c")
+//    Run a subprocess and return its standard output as a string.
+//    - script: the script to run; a string.
+//    - interpreter: command that runs the script. It defaults to "bash -c".
+//
+//    For example, command("print('foo'*2)", interpreter="python3 -c") will produce
+//    "foofoo\n".
+//
 // Diviner configs must include one or more studies as toplevel declarations.
 // Global starlark objects are frozen after initial evaluation to prevent functions
 // from modifying shared state.
@@ -101,8 +109,12 @@
 package script
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/bigmachine"
@@ -148,6 +160,7 @@ func Load(filename string, src interface{}) ([]diviner.Study, Config, error) {
 		"config":      starlark.NewBuiltin("config", makeConfig),
 		"localsystem": starlark.NewBuiltin("localsystem", makeLocalSystem),
 		"ec2system":   starlark.NewBuiltin("ec2system", makeEC2System),
+		"command":     starlark.NewBuiltin("command", makeCommand),
 	}
 	globals, err := starlark.ExecFile(thread, filename, src, builtins)
 	// Freeze everything now so that if we try to mutate global state
@@ -468,4 +481,32 @@ func makeEC2System(thread *starlark.Thread, _ *starlark.Builtin, args starlark.T
 	ec2.Diskspace = uint(diskspace)
 	ec2.Dataspace = uint(dataspace)
 	return system, nil
+}
+
+func makeCommand(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var (
+		script      string
+		interpreter = "bash -c"
+	)
+	err := starlark.UnpackArgs(
+		"command", args, kwargs,
+		"script", &script,
+		"interpreter?", &interpreter,
+	)
+	if err != nil {
+		return nil, err
+	}
+	outbuf := bytes.Buffer{}
+	cmd := exec.Cmd{
+		Args:   append(strings.Split(interpreter, " "), script),
+		Stdout: &outbuf,
+		Stderr: os.Stderr,
+	}
+	if cmd.Path, err = exec.LookPath(cmd.Args[0]); err != nil {
+		return nil, err
+	}
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return starlark.String(outbuf.Bytes()), nil
 }

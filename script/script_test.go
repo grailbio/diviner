@@ -62,3 +62,22 @@ func TestScript(t *testing.T) {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
 }
+
+func TestCommand(t *testing.T) {
+	studies, _, err := script.Load("testdata/commands.dv", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(studies), 3; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := studies[0].Name, "foo"; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := studies[1].Name, "foofoo"; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := studies[2].Name, "1.4142135623730951"; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}

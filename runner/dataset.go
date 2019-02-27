@@ -48,24 +48,24 @@ func (d *dataset) Do(ctx context.Context, runner *Runner) {
 			d.setStatus(statusOk)
 			return
 		} else if !errors.Is(errors.NotExist, err) {
-			d.error(err)
+			d.error(errors.E("dataset: ifnotexist", url, err))
 			return
 		}
 	}
 	w, err := runner.allocate(ctx, d.System)
 	if err != nil {
-		d.error(err)
+		d.error(errors.E("dataset: allocate", d.System, err))
 		return
 	}
 	defer w.Return()
 	d.setStatus(statusRunning)
 	if err := w.CopyFiles(ctx, d.LocalFiles); err != nil {
-		d.error(err)
+		d.error(errors.E(fmt.Sprintf("dataset copyfiles %+v", d.LocalFiles, err)))
 		return
 	}
 	out, err := w.Run(ctx, d.Script)
 	if err != nil {
-		d.errorf("failed to start dataset script: %s", err)
+		d.error(errors.E(fmt.Sprintf("dataset: failed to start script '%s'", d.Script), err))
 		return
 	}
 	var writer io.Writer = ioutil.Discard
@@ -74,7 +74,7 @@ func (d *dataset) Do(ctx context.Context, runner *Runner) {
 		writer = f
 		defer f.Close()
 	} else {
-		log.Error.Printf("create %s: %v", path, err)
+		log.Error.Printf("dataset: create %s: %v", path, err)
 	}
 	_, err = io.Copy(writer, out)
 	if e := out.Close(); e != nil && err == nil {
@@ -118,6 +118,7 @@ func (d *dataset) setStatusLocked(status status) {
 // Error sets the dataset's status to statusErr and
 // its error to the provided error.
 func (d *dataset) error(err error) {
+	log.Error.Print(err)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.err = err

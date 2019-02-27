@@ -244,6 +244,7 @@ func main() {
 	}
 	log.SetPrefix("")
 	log.AddFlags()
+	log.SetFlags(log.Ldate | log.Ltime)
 	flag.Usage = usage
 	flag.Parse()
 	if flag.NArg() < 2 {

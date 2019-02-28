@@ -160,6 +160,7 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 					line = line[:len(line)-1]
 				}
 			}
+
 			r.setStatus(statusRunning, string(line))
 			if !progress {
 				if _, err := r.Run.Write(line); err != nil {

@@ -22,6 +22,7 @@ import (
 	"github.com/grailbio/base/retry"
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/bigmachine/ec2system"
+	"github.com/grailbio/bigmachine/rpc"
 	"golang.org/x/time/rate"
 )
 
@@ -235,6 +236,9 @@ func (c *commandService) Run(ctx context.Context, command []string, reply *io.Re
 		cmd.Dir = c.dir
 		w.CloseWithError(cmd.Run())
 	}()
-	*reply = r
+	// rpc.Flush ensures that the reply streams are not buffered;
+	// so that logs are propagated quickly. Possibly we should make
+	// this line buffered instead.
+	*reply = rpc.Flush(r)
 	return nil
 }

@@ -60,7 +60,7 @@ func (d *dataset) Do(ctx context.Context, runner *Runner) {
 	defer w.Return()
 	d.setStatus(statusRunning)
 	if err := w.CopyFiles(ctx, d.LocalFiles); err != nil {
-		d.error(errors.E(fmt.Sprintf("dataset copyfiles %+v", d.LocalFiles, err)))
+		d.error(errors.E(fmt.Sprintf("dataset copyfiles %+v: %v", d.LocalFiles, err)))
 		return
 	}
 	out, err := w.Run(ctx, d.Script)

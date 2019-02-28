@@ -5,8 +5,10 @@
 package runner_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -144,7 +146,7 @@ func TestRunnerError(t *testing.T) {
 		Run: func(values diviner.Values) diviner.RunConfig {
 			config := diviner.RunConfig{
 				System: system,
-				Script: "exit 1",
+				Script: "echo the_status; exit 1",
 			}
 			if values["param"].Int() == 0 {
 				// In this case, the run should fail before attempting
@@ -178,6 +180,29 @@ func TestRunnerError(t *testing.T) {
 	}
 	if got, want := len(runs), 0; got != want {
 		t.Errorf("got %v, want %v", got, want)
+	}
+	runs, err = db.Runs(ctx, study, diviner.Failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(runs), 2; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for _, run := range runs {
+		if run.Values()["param"].Int() == 0 {
+			continue
+		}
+		var b bytes.Buffer
+		if _, err := io.Copy(&b, run.Log()); err != nil {
+			t.Error(err)
+			continue
+		}
+		if got, want := b.String(), `+ echo the_status
+the_status
++ exit 1
+`; got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
 	}
 }
 

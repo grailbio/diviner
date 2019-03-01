@@ -54,7 +54,7 @@ func TestRunner(t *testing.T) {
 		Params: diviner.Params{
 			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1), diviner.Int(2)),
 		},
-		Run: func(values diviner.Values) (diviner.RunConfig, error) {
+		Run: func(values diviner.Values, ident string) (diviner.RunConfig, error) {
 			return diviner.RunConfig{
 				System:   system,
 				Datasets: []diviner.Dataset{dataset},
@@ -143,7 +143,7 @@ func TestRunnerError(t *testing.T) {
 		Params: diviner.Params{
 			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1)),
 		},
-		Run: func(values diviner.Values) (diviner.RunConfig, error) {
+		Run: func(values diviner.Values, ident string) (diviner.RunConfig, error) {
 			config := diviner.RunConfig{
 				System: system,
 				Script: "echo the_status; exit 1",

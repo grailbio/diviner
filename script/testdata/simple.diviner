@@ -24,3 +24,4 @@ for (name, objective) in [("study_1", minimize("x")), ("study_2", maximize("z"))
         run=run_simple_model,
         oracle=skopt(acq_func="EI"),
     )
+

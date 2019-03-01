@@ -292,7 +292,7 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 	}
 	run.Study = study
 	run.Values = values
-	run.Config, err = study.Run(values)
+	run.Config, err = study.Run(values, run.ID())
 	if err != nil {
 		return nil, err
 	}

@@ -72,8 +72,10 @@
 //		- params:    a dictionary with naming a set of parameters
 //		             to be optimized;
 //		- run:       a function that returns a run_config for a set
-//		             of parameter values.
-//		- oracle:    the oracle to use (grid search by default)
+//		             of parameter values; the first argument to the function
+//		             is a dictionary of parameter values, the optional second
+//		             argument is a string uniquely identifying the run.
+//		- oracle:    the oracle to use (grid search by default).
 //
 //	grid_search
 //		The grid search oracle
@@ -292,7 +294,7 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 			return nil, fmt.Errorf("parameter %s is not a valid parameter", string(keystr))
 		}
 	}
-	study.Run = func(vals diviner.Values) (diviner.RunConfig, error) {
+	study.Run = func(vals diviner.Values, ident string) (diviner.RunConfig, error) {
 		var input starlark.Dict
 		for key, value := range vals {
 			var val starlark.Value
@@ -308,7 +310,11 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 			}
 			input.SetKey(starlark.String(key), val)
 		}
-		val, err := starlark.Call(thread, runner, starlark.Tuple{&input}, nil)
+		args := starlark.Tuple{&input}
+		if runner.NumParams() > 1 {
+			args = append(args, starlark.String(ident))
+		}
+		val, err := starlark.Call(thread, runner, args, nil)
 		if err != nil {
 			return diviner.RunConfig{}, err
 		}

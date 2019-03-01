@@ -258,7 +258,9 @@ type Study struct {
 	// instantiation of values in the ranges as indicated by the black
 	// box parameters defined above); it produces a run configuration
 	// which is then used to conduct a trial of these parameter values.
-	Run func(Values) (RunConfig, error) `json:"-"`
+	// Ident is a unique string identifying the run. This can be used by
+	// the run to for example save run output keyed by the run id.
+	Run func(vals Values, ident string) (RunConfig, error) `json:"-"`
 }
 
 // String returns a textual description of the study.

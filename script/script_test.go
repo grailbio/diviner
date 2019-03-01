@@ -49,10 +49,13 @@ func TestScript(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 
-	runConfig := studies[0].Run(diviner.Values{
+	runConfig, err := studies[0].Run(diviner.Values{
 		"learning_rate": diviner.Float(0.1),
 		"dropout":       diviner.Float(0.5),
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	expect := diviner.RunConfig{
 		Script:     "echo 0.1 0.5",
 		LocalFiles: []string{"x", "y", "z"},

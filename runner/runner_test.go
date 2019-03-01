@@ -54,7 +54,7 @@ func TestRunner(t *testing.T) {
 		Params: diviner.Params{
 			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1), diviner.Int(2)),
 		},
-		Run: func(values diviner.Values) diviner.RunConfig {
+		Run: func(values diviner.Values) (diviner.RunConfig, error) {
 			return diviner.RunConfig{
 				System:   system,
 				Datasets: []diviner.Dataset{dataset},
@@ -65,7 +65,7 @@ func TestRunner(t *testing.T) {
 						echo METRICS: paramvalue=1
 						echo METRICS: another=3,paramvalue=%s
 					`, datasetFile, values["param"]),
-			}
+			}, nil
 		},
 		Objective: diviner.Objective{diviner.Maximize, "acc"},
 		Oracle:    &oracle.GridSearch{},
@@ -143,7 +143,7 @@ func TestRunnerError(t *testing.T) {
 		Params: diviner.Params{
 			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1)),
 		},
-		Run: func(values diviner.Values) diviner.RunConfig {
+		Run: func(values diviner.Values) (diviner.RunConfig, error) {
 			config := diviner.RunConfig{
 				System: system,
 				Script: "echo the_status; exit 1",
@@ -153,7 +153,7 @@ func TestRunnerError(t *testing.T) {
 				// execution.
 				config.Datasets = []diviner.Dataset{dataset}
 			}
-			return config
+			return config, nil
 		},
 		Objective: diviner.Objective{diviner.Maximize, "acc"},
 		Oracle:    &oracle.GridSearch{},

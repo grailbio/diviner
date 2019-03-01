@@ -258,7 +258,7 @@ type Study struct {
 	// instantiation of values in the ranges as indicated by the black
 	// box parameters defined above); it produces a run configuration
 	// which is then used to conduct a trial of these parameter values.
-	Run func(Values) RunConfig `json:"-"`
+	Run func(Values) (RunConfig, error) `json:"-"`
 }
 
 // String returns a textual description of the study.

@@ -28,7 +28,7 @@ import (
 
 // IdleTime is the amount of time workers are allowed to remain idle
 // before being stopped.
-const idleTime = time.Minute
+const idleTime = 5 * time.Minute
 
 // A Runner is responsible for creating a cluster of machines and running
 // trials on the cluster.
@@ -292,7 +292,10 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 	}
 	run.Study = study
 	run.Values = values
-	run.Config = study.Run(values)
+	run.Config, err = study.Run(values)
+	if err != nil {
+		return nil, err
+	}
 	r.add(run)
 	defer r.remove(run)
 	run.Do(ctx, r)

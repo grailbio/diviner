@@ -130,6 +130,7 @@ func init() {
 	resolve.AllowLambda = true
 	// So that we can, e.g., define studies in a toplevel loop.
 	resolve.AllowGlobalReassign = true
+	resolve.AllowRecursion = true
 }
 
 // Load loads configuration from a Starlark script. Arguments are as
@@ -291,7 +292,7 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 			return nil, fmt.Errorf("parameter %s is not a valid parameter", string(keystr))
 		}
 	}
-	study.Run = func(vals diviner.Values) diviner.RunConfig {
+	study.Run = func(vals diviner.Values) (diviner.RunConfig, error) {
 		var input starlark.Dict
 		for key, value := range vals {
 			var val starlark.Value
@@ -309,15 +310,13 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 		}
 		val, err := starlark.Call(thread, runner, starlark.Tuple{&input}, nil)
 		if err != nil {
-			// TODO(marius): allow run configs to fail
-			panic(err)
+			return diviner.RunConfig{}, err
 		}
 		config, ok := val.(diviner.RunConfig)
 		if !ok {
-			// TODO(marius): allow run configs to fail
-			panic(config)
+			return diviner.RunConfig{}, err
 		}
-		return config
+		return config, nil
 	}
 	studies := thread.Local("studies").(*[]diviner.Study)
 	*studies = append(*studies, study)

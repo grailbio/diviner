@@ -255,8 +255,13 @@ func scanProgress(data []byte, atEOF bool) (advance int, token []byte, err error
 		ni = bytes.IndexByte(data, '\n')
 		ri = bytes.IndexByte(data, '\r')
 	)
-	if ni >= 0 && (ri < 0 || ni < ri) {
-		return ni + 1, data[:ni], nil
+	if ni >= 0 {
+		if ri < 0 || ni < ri {
+			return ni + 1, data[:ni], nil
+		}
+		if ri == ni-1 { // "\r\n"
+			return ni + 1, data[:ni-1], nil
+		}
 	}
 	if ri >= 0 {
 		return ri + 1, data[:ri+1], nil

@@ -23,6 +23,8 @@ import (
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/bigmachine/ec2system"
 	"github.com/grailbio/bigmachine/rpc"
+	"github.com/kr/pty"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
 )
 
@@ -228,17 +230,32 @@ func (c *commandService) Run(ctx context.Context, command []string, reply *io.Re
 	if len(command) == 0 {
 		return errors.New("empty command")
 	}
-	r, w := io.Pipe()
-	go func() {
+	// Connect the child's stdout/stderr to a terminal.  This will prevent the
+	// process from buffering outputs (e.g., C FILE* does so by default).
+	pty, tty, err := pty.Open()
+	if err != nil {
+		return err
+	}
+	piper, pipew := io.Pipe()
+	eg := errgroup.Group{}
+	eg.Go(func() error {
+		defer tty.Close()
 		cmd := exec.Command(command[0], command[1:]...)
-		cmd.Stdout = w
-		cmd.Stderr = w
+		cmd.Stdout = tty
+		cmd.Stderr = tty
 		cmd.Dir = c.dir
-		w.CloseWithError(cmd.Run())
+		return cmd.Run()
+	})
+	go func() {
+		_, _ = io.Copy(pipew, pty)
+		err := eg.Wait()
+		pty.Close()
+		pipew.CloseWithError(err)
 	}()
+
 	// rpc.Flush ensures that the reply streams are not buffered;
 	// so that logs are propagated quickly. Possibly we should make
 	// this line buffered instead.
-	*reply = rpc.Flush(r)
+	*reply = rpc.Flush(piper)
 	return nil
 }

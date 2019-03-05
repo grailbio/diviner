@@ -193,7 +193,7 @@ func TestRunnerError(t *testing.T) {
 			continue
 		}
 		var b bytes.Buffer
-		if _, err := io.Copy(&b, run.Log()); err != nil {
+		if _, err := io.Copy(&b, run.Log(false)); err != nil {
 			t.Error(err)
 			continue
 		}

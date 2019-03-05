@@ -146,7 +146,7 @@ func TestDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	var c bytes.Buffer
-	if _, err := io.Copy(&c, run.Log()); err != nil {
+	if _, err := io.Copy(&c, run.Log(false)); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := c.Len(), b.Len(); got != want {

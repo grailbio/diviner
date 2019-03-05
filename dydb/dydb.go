@@ -386,9 +386,9 @@ func (r *run) Complete(ctx context.Context, state diviner.RunState) error {
 }
 
 // Log implements diviner.Run.
-func (r *run) Log() io.Reader {
+func (r *run) Log(follow bool) io.Reader {
 	group, stream := r.streamKeys()
-	return &logReader{sess: r.sess, group: group, stream: stream}
+	return &logReader{sess: r.sess, group: group, stream: stream, follow: follow}
 }
 
 func (r *run) flusher(stop bool) {
@@ -620,10 +620,13 @@ func valueMetrics(v *dynamodb.AttributeValue) (diviner.Metrics, error) {
 	return metrics, nil
 }
 
+var errEmptyReply = errors.New("empty reply")
+
 type logReader struct {
 	sess          *session.Session
 	group, stream string
 
+	follow    bool
 	save, buf []byte
 	nextToken *string
 }
@@ -632,6 +635,13 @@ func (r *logReader) Read(p []byte) (n int, err error) {
 	for len(r.buf) == 0 {
 		var err error
 		r.buf, err = r.append(r.save[:0])
+		if err == errEmptyReply {
+			if r.follow {
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			err = io.EOF
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -657,10 +667,10 @@ func (r *logReader) append(buf []byte) ([]byte, error) {
 		return buf, err
 	}
 	if len(out.Events) == 0 {
-		return buf, io.EOF
+		return buf, errEmptyReply
 	}
 	if aws.StringValue(r.nextToken) == aws.StringValue(out.NextForwardToken) {
-		return buf, io.EOF
+		return buf, errEmptyReply
 	}
 	for _, event := range out.Events {
 		m := aws.StringValue(event.Message)

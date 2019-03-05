@@ -685,15 +685,23 @@ func ps(db diviner.Database, studies []diviner.Study, args []string) {
 }
 
 func logs(db diviner.Database, args []string) {
-	if len(args) != 1 {
-		flag.Usage()
+	var (
+		flags  = flag.NewFlagSet("logs", flag.ExitOnError)
+		follow = flags.Bool("f", false, "follow the log: print updates as they are appended")
+	)
+	if err := flags.Parse(args); err != nil {
+		log.Fatal(err)
+	}
+	if flags.NArg() != 1 {
+		flags.Usage()
+		os.Exit(2)
 	}
 	ctx := context.Background()
-	run, err := db.Run(ctx, args[0])
+	run, err := db.Run(ctx, flags.Arg(0))
 	if err != nil {
-		log.Fatalf("error retrieving run %s: %v", args[0], err)
+		log.Fatalf("error retrieving run %s: %v", flags.Arg(0), err)
 	}
-	if _, err := io.Copy(os.Stdout, run.Log()); err != nil {
+	if _, err := io.Copy(os.Stdout, run.Log(*follow)); err != nil {
 		log.Fatal(err)
 	}
 }

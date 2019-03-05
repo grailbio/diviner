@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/grailbio/diviner"
 	bolt "go.etcd.io/bbolt"
@@ -308,8 +309,8 @@ func (r *run) Complete(ctx context.Context, state diviner.RunState) error {
 }
 
 // Log implements diviner.Run.
-func (r *run) Log() io.Reader {
-	return &runReader{run: r, whence: 1}
+func (r *run) Log(follow bool) io.Reader {
+	return &runReader{run: r, whence: 1, follow: follow}
 }
 
 type runWriter struct{ *run }
@@ -334,10 +335,13 @@ func (w runWriter) Write(p []byte) (n int, err error) {
 	return
 }
 
+var errEndOfStream = errors.New("end of stream")
+
 type runReader struct {
 	*run
 	whence uint64
 	buf    []byte
+	follow bool
 }
 
 func (r *runReader) Read(p []byte) (n int, err error) {
@@ -353,7 +357,7 @@ func (r *runReader) Read(p []byte) (n int, err error) {
 			}
 			r.buf = b.Get(key(r.whence))
 			if r.buf == nil {
-				return io.EOF
+				return errEndOfStream
 			}
 			r.buf, err = inflate(r.buf)
 			if err != nil {
@@ -362,6 +366,15 @@ func (r *runReader) Read(p []byte) (n int, err error) {
 			r.whence++
 			return nil
 		})
+		if err == errEndOfStream {
+			if r.follow {
+				// We could do better here since writes are happening
+				// in the same process. But this is simpler and it works.
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			err = io.EOF
+		}
 		if err != nil {
 			return
 		}

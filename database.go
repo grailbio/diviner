@@ -76,8 +76,9 @@ type Run interface {
 	// (which cannot be Pending).
 	Complete(ctx context.Context, state RunState) error
 	// Log returns a reader from which the run's log messages may
-	// be read from persistent storage.
-	Log() io.Reader
+	// be read from persistent storage. If follow is true, the returned
+	// reader streams ongoing log updates indefinitely.
+	Log(follow bool) io.Reader
 }
 
 // A Database is used to track studies and their results.

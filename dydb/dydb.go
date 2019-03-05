@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -596,6 +597,12 @@ func metricsValue(m diviner.Metrics) *dynamodb.AttributeValue {
 	v := new(dynamodb.AttributeValue)
 	v.M = make(map[string]*dynamodb.AttributeValue)
 	for k, n := range m {
+		// DynamoDB does not support storing NaNs, so we must omit them.
+		// TODO(marius): should we store the NaNs explicitly in some other way?
+		if math.IsNaN(n) {
+			log.Error.Printf("dynamodb: dropping metric %s: NaN", k)
+			continue
+		}
 		v.M[k] = &dynamodb.AttributeValue{N: aws.String(fmt.Sprint(n))}
 	}
 	return v

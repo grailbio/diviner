@@ -7,7 +7,7 @@
 // and lambda extensions of the language.
 //
 // Script defines the following builtins for defining Diviner
-// configurations:  marks indicate optional arguments.)
+// configurations (question marks indicate optional arguments):
 //
 //	config(database, table)
 //		Configures Diviner to use the provided database

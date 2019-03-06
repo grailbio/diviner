@@ -15,12 +15,9 @@ import (
 )
 
 func TestScript(t *testing.T) {
-	studies, config, err := script.Load("testdata/simple.diviner", nil)
+	studies, err := script.Load("testdata/simple.diviner", nil)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if got, want := config, (script.Config{Database: script.Local, Table: "test"}); got != want {
-		t.Errorf("got %v, want %v", got, want)
 	}
 	if got, want := len(studies), 2; got != want {
 		t.Errorf("got %v, want %v", got, want)
@@ -52,7 +49,7 @@ func TestScript(t *testing.T) {
 	runConfig, err := studies[0].Run(diviner.Values{
 		"learning_rate": diviner.Float(0.1),
 		"dropout":       diviner.Float(0.5),
-	}, "test")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,26 +63,8 @@ func TestScript(t *testing.T) {
 	}
 }
 
-func TestScriptIdent(t *testing.T) {
-	studies, _, err := script.Load("testdata/ident.diviner", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := len(studies), 1; got != want {
-		t.Errorf("got %v, want %v", got, want)
-	}
-	study := studies[0]
-	config, err := study.Run(nil, "test1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := config.Script, "test1"; got != want {
-		t.Errorf("got %v, want %v", got, want)
-	}
-}
-
 func TestCommand(t *testing.T) {
-	studies, _, err := script.Load("testdata/commands.dv", nil)
+	studies, err := script.Load("testdata/commands.dv", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

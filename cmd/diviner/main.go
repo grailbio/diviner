@@ -45,9 +45,6 @@
 // maximize the accuracy of a model, parameterized by the optimizer
 // used and training batch size. It uses an Amazon GPU instance to
 // train the model but creates the dataset on the local machine.
-// Run state is stored in the "testdiviner" DynamoDB table.
-//
-//	config(database="dynamodb", table="testdiviner")
 //
 //	# local defines a system using the local machine with a maximum
 //	# parallelism of 2.
@@ -127,40 +124,44 @@
 // and examine study results.
 //
 // Usage:
-//	diviner config.dv list
-//	diviner config.dv run [-rounds M] [-trials N]
-//	diviner config.dv run regexp [-rounds M] [-trials N]
-//	diviner config.dv summarize study
-//	diviner config.dv ps
-//	diviner config.dv ps studies...
-//	diviner config.dv logs runID
+//	diviner list [-runs] studies...
+//		List studies available studies or runs.
+//	diviner info [-v] names...
+//		Display information for the given study or run names.
+//	diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...
+//		Display a leaderboard of all trails in the provided studies. The leaderboard
+//		uses the studies' shared objective unless overridden.
+//	diviner run [-rounds M] [-trials N] script.dv [studies]
+//		Run M rounds of N trials of the studies matching regexp.
+//		All studies are run if the regexp is omitted.
+//	diviner logs [-f] run
+//		Write the logs for the given run to standard output.
 //
-// diviner config.dv list lists the studies provided by the
-// configuration config.dv.
+// diviner list [-runs] studies... lists the studies matching the regular
+// expressions given. If -runs is specified then the study's runs are
+// listed instead.
 //
-// diviner config.dv run regexp  [-rounds M] [-trials N] conducts M
-// rounds (default 1) of N trials of all studies matching the
-// provided regexp, as configured in config.dv. If N not provided,
-// then all trials are run, as long as the set of trials are finite. If the regular
-// expression is omitted, it matches all studies.
+// diviner info [-v] names... displays detailed information about the
+// matching study or run names. If -v is given then even more verbose
+// output is given.
 //
-// diviner config.dv summarize study summarizes the named study; it
-// outputs a TSV of all known completed trials, specifying parameter
-// values. The TSV is ordered by the objective.
+// diviner leaderboard [-objective objective] [-n N] [-values values]
+// [-metrics metrics] studies... displays a leaderboard of all trials
+// matching the provided studies. The leaderboard is ordered by the
+// studies' shared objective unless overridden the -objective flag.
+// Parameter values and additional metrics may be displayed by
+// providing regular expressions to the -values and -metrics flags
+// respectively.
 //
-// diviner config.dv ps returns a summary of currently ongoing runs
-// for all studies. The output includes information about each
-// pending run, the last line of log output (which may be a progress
-// bar), and the latest reported metrics.
+// diviner run [-rounds M] [-trials N] script.dv [studies] performs
+// trials as defined in the provided script. M rounds of N trials
+// each are performed for each of the studies that matches the
+// argument. If no studies are specified, all studies are run
+// concurrently.
 //
-// diviner config.dv ps studies... returns a summary of currently
-// ongoing runs for the provided studies. The output includes
-// information about each pending run, the last line of log output
-// (which may be a progress bar), and the latest reported metrics.
-//
-// diviner config.dv logs runID writes the log output of a run to standard output.
-// The run identified by a run identifier which may be retrieved by the "summarize"
-// or "list" commands.
+// diviner logs [-f] run writes logs from the named run to standard
+// output. If -f is given, the log is followed and updates are written
+// as they appear.
 //
 // [1] https://www.kdd.org/kdd2017/papers/view/google-vizier-a-service-for-black-box-optimization
 // [2] https://docs.bazel.build/versions/master/skylark/language.html
@@ -168,7 +169,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"expvar"
 	"flag"
 	"fmt"
@@ -181,13 +181,14 @@ import (
 	"strings"
 	"sync/atomic"
 	"text/tabwriter"
+	"text/template"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/grailbio/base/file"
 	"github.com/grailbio/base/file/s3file"
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/base/traverse"
-	"github.com/grailbio/base/tsv"
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/bigmachine/ec2system"
 	"github.com/grailbio/diviner"
@@ -208,20 +209,24 @@ func initS3() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
-	diviner config.dv list
-		List studies available in the provided configuration.
-	diviner config.dv run [-rounds M] [-trials N]
-	diviner config.dv run regexp [-rounds M] [-trials N]
+	diviner list [-runs] studies...
+		List studies available studies or runs.
+	diviner info [-v] names...
+		Display information for the given study or run names.
+	diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...
+		Display a leaderboard of all trails in the provided studies. The leaderboard
+		uses the studies' shared objective unless overridden.
+	diviner run [-rounds M] [-trials N] script.dv [studies]
 		Run M rounds of N trials of the studies matching regexp.
 		All studies are run if the regexp is omitted.
-	diviner config.dv summarize study
-		Summarizes the known set of trials in the provided study.
-	diviner config.dv ps
-		Summarize currently ongoing trials in all trials.
-	diviner config.dv ps studies...
-		Summarize currently ongoing trials for the provided studies.
-	diviner config.dv logs run
+	diviner logs [-f] run
 		Write the logs for the given run to standard output.
+
+Whenever studies are named in commands, they are interpreted as
+anchored regular expressions. Thus a given study name without any
+regular expression control characters matches the study exactly. The
+-help flag for each subcommand provides detailed documentation for
+the command.
 
 Flags:`)
 	flag.PrintDefaults()
@@ -229,6 +234,8 @@ Flags:`)
 }
 
 var httpaddr = flag.String("http", ":6000", "http status address")
+
+var traverser = traverse.Limit(100)
 
 func main() {
 	initS3()
@@ -245,52 +252,43 @@ func main() {
 	log.SetPrefix("")
 	log.AddFlags()
 	log.SetFlags(log.Ldate | log.Ltime)
+
+	databaseConfig := flag.String("db", "dynamodb,diviner-patchcnn", "database table where state is stored")
 	flag.Usage = usage
 	flag.Parse()
-	if flag.NArg() < 2 {
+	if flag.NArg() == 0 {
 		flag.Usage()
 	}
-	studies, config, err := script.Load(flag.Arg(0), nil)
-	if err != nil {
-		log.Fatalf("error loading config %s: %v", flag.Arg(0), err)
-	}
 	var database diviner.Database
-	switch config.Database {
-	case script.Local:
+	parts := strings.SplitN(*databaseConfig, ",", 2)
+	if len(parts) != 2 {
+		log.Fatalf("invalid database config %s", *databaseConfig)
+	}
+	switch kind, table := parts[0], parts[1]; kind {
+	case "local":
 		var err error
-		database, err = localdb.Open(config.Table)
+		database, err = localdb.Open(table)
 		if err != nil {
 			log.Fatal(err)
 		}
-	case script.DynamoDB:
-		database = dydb.New(session.New(), config.Table)
+	case "dynamodb":
+		database = dydb.New(session.New(), table)
 	default:
-		log.Fatalf("invalid database type %d", config.Database)
+		log.Fatalf("invalid database kind %s", kind)
 	}
 
-	switch flag.Arg(1) {
+	args := flag.Args()[1:]
+	switch flag.Arg(0) {
 	case "list":
-		for _, study := range studies {
-			fmt.Println(study.Name)
-		}
+		list(database, args)
+	case "info":
+		info(database, args)
 	case "run":
-		run(database, studies, flag.Args()[2:])
-	case "summarize":
-		if flag.NArg() < 3 {
-			flag.Usage()
-		}
-		study := find(studies, flag.Arg(2))
-		summarize(database, study, flag.Args()[3:])
-	case "ps":
-		if flag.NArg() < 2 {
-			flag.Usage()
-		}
-		ps(database, studies, flag.Args()[2:])
+		run(database, args)
+	case "leaderboard":
+		leaderboard(database, args)
 	case "logs":
-		if flag.NArg() < 2 {
-			flag.Usage()
-		}
-		logs(database, flag.Args()[2:])
+		logs(database, args)
 	default:
 		flag.Usage()
 	}
@@ -325,24 +323,196 @@ func match(studies *[]diviner.Study, pat string) {
 	*studies = (*studies)[:n]
 }
 
-func run(db diviner.Database, studies []diviner.Study, args []string) {
+func list(db diviner.Database, args []string) {
 	var (
-		flags   = flag.NewFlagSet("run", flag.ExitOnError)
-		ntrials = flags.Int("trials", 0, "number of trials to run in each round")
-		nrounds = flags.Int("rounds", 1, "number of rounds to run")
+		flags    = flag.NewFlagSet("list", flag.ExitOnError)
+		listRuns = flags.Bool("runs", false, "list runs matching studies")
+		runState = flags.String("state", "pending,success,failure", "list of run states to query")
 	)
+	flags.Usage = func() {
+		fmt.Fprintln(os.Stderr, `usage: diviner list [-runs] studies...
+
+List prints a summary overview of all studies (or runs) that match
+the given study names.`)
+		flags.PrintDefaults()
+		os.Exit(2)
+	}
 	if err := flags.Parse(args); err != nil {
 		log.Fatal(err)
 	}
-	switch flags.NArg() {
+	ctx := context.Background()
+	args = flags.Args()
+	if len(args) == 0 {
+		args = []string{".*"} // list all
+	}
+	studies := studies(ctx, db, args)
+	if !*listRuns {
+		for _, study := range studies {
+			fmt.Println(study.Name)
+		}
+		return
+	}
+	var tw tabwriter.Writer
+	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
+	var state diviner.RunState
+	for _, s := range strings.Split(*runState, ",") {
+		switch s {
+		case "pending":
+			state |= diviner.Pending
+		case "success":
+			state |= diviner.Success
+		case "failure":
+			state |= diviner.Failure
+		default:
+			log.Fatalf("invalid run state %s", state)
+		}
+	}
+	if state == 0 {
+		log.Fatal("no run states given")
+	}
+	runs := make([][]diviner.Run, len(studies))
+	err := traverser.Each(len(studies), func(i int) (err error) {
+		runs[i], err = db.Runs(ctx, studies[i].Name, state)
+		return err
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	now := time.Now()
+	for i, study := range studies {
+		for _, run := range runs[i] {
+			var layout = time.Kitchen
+			switch dur := now.Sub(run.Created()); {
+			case dur > 7*24*time.Hour:
+				layout = "2Jan06"
+			case dur > 24*time.Hour:
+				layout = "Mon3:04PM"
+			}
+			fmt.Fprintf(&tw, "%s:%s\t%s\t%s\t%s\n",
+				study.Name, run.ID(), run.Created().Local().Format(layout),
+				run.Runtime(), run.State())
+		}
+	}
+	tw.Flush()
+}
+
+var (
+	studyTemplate = template.Must(template.New("study").Parse(`study {{.Name}}:
+	objective:	{{.Objective}}{{range $_, $value := .Params.Sorted }}
+	{{$value.Name}}:	{{$value.Param}}{{end}}
+	oracle:	{{printf "%T" .Oracle}}
+`))
+
+	runFuncMap = template.FuncMap{
+		"reindent": reindent,
+	}
+
+	runTemplate = template.Must(template.New("study").Funcs(runFuncMap).Parse(`run {{.study}}:{{.run.ID}}:
+	state:	{{.run.State}}
+	created:	{{.run.Created.Local}}
+	runtime:	{{.run.Runtime}}
+	values:{{range $_, $value := .run.Values.Sorted }}
+		{{$value.Name}}:	{{$value.Value}}{{end}}
+	metrics:{{range $_, $metric := .metrics.Sorted }}
+		{{$metric.Name}}:	{{$metric.Value}}{{end}}{{if .verbose}}
+	script:
+{{reindent "		" .run.Config.Script}}{{end}}
+`))
+)
+
+func info(db diviner.Database, args []string) {
+	flags := flag.NewFlagSet("list", flag.ExitOnError)
+	verbose := flags.Bool("v", false, "verbose output")
+	flags.Usage = func() {
+		fmt.Fprintln(os.Stderr, `usage: diviner info [-v] ids...
+
+Info displays detailed information about studies or runs.`)
+		flags.PrintDefaults()
+		os.Exit(2)
+	}
+	if err := flags.Parse(args); err != nil {
+		log.Fatal(err)
+	}
+	if flags.NArg() == 0 {
+		flags.Usage()
+	}
+	ctx := context.Background()
+	var tw tabwriter.Writer
+	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
+	for _, arg := range flags.Args() {
+		parts := strings.SplitN(arg, ":", 2)
+		switch len(parts) {
+		case 1:
+			study, err := db.Study(ctx, parts[0])
+			if err != nil {
+				log.Fatal(err)
+			}
+			if err := studyTemplate.Execute(&tw, study); err != nil {
+				log.Fatal(err)
+			}
+		case 2:
+			run, err := db.Run(ctx, parts[0], parts[1])
+			if err != nil {
+				log.Fatal(err)
+			}
+			metrics, err := run.Metrics(ctx)
+			if err != nil {
+				log.Fatal(err)
+			}
+			err = runTemplate.Execute(&tw, map[string]interface{}{
+				"study":   parts[0],
+				"run":     run,
+				"metrics": metrics,
+				"verbose": *verbose,
+			})
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+	}
+	tw.Flush()
+}
+
+func run(db diviner.Database, args []string) {
+	var (
+		flags   = flag.NewFlagSet("run", flag.ExitOnError)
+		ntrials = flags.Int("trials", 1, "number of trials to run in each round")
+		nrounds = flags.Int("rounds", 1, "number of rounds to run")
+	)
+	flags.Usage = func() {
+		fmt.Fprintln(os.Stderr, `usage: diviner run [-rounds n] [-trials n] script.dv [studies]
+
+Run performs trials for the studies as specified in the given diviner
+script. The rounds for each matching study is run concurrently; each
+round runs up to the given number of trials at the same time.
+
+The run command runs a diagnostic http server where individual
+run status may be obtained. If a shared database is used, this may
+also be used to inspect run status.
+
+If no studies are specified, all defined studies are run concurrently.`)
+		flags.PrintDefaults()
+		os.Exit(2)
+	}
+	if err := flags.Parse(args); err != nil {
+		log.Fatal(err)
+	}
+	if flags.NArg() < 1 {
+		flags.Usage()
+	}
+	studies, err := script.Load(flags.Arg(0), nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	args = flags.Args()[1:]
+	switch len(args) {
 	case 0: // all studies
 	case 1:
-		match(&studies, flags.Arg(0))
+		match(&studies, args[0])
 	default:
 		flags.Usage()
 		os.Exit(2)
 	}
-
 	go func() {
 		err := http.ListenAndServe(*httpaddr, nil)
 		log.Error.Printf("failed to start diagnostic http server: %v", err)
@@ -365,7 +535,7 @@ func run(db diviner.Database, studies []diviner.Study, args []string) {
 	log.Printf("performing trials for studies: %s", strings.Join(names, ", "))
 
 	var nerr uint32
-	_ = traverse.Each(len(studies), func(i int) error {
+	_ = traverser.Each(len(studies), func(i int) error {
 		if err := runStudy(ctx, runner, studies[i], *ntrials, *nrounds); err != nil {
 			atomic.AddUint32(&nerr, 1)
 			log.Error.Printf("study %v failed: %v", studies[i], err)
@@ -399,289 +569,171 @@ func runStudy(ctx context.Context, runner *runner.Runner, study diviner.Study, n
 	return nil
 }
 
-func summarize(db diviner.Database, study diviner.Study, args []string) {
-	if len(args) != 0 {
-		flag.Usage()
-	}
-	ctx := context.Background()
-	runs, err := db.Runs(ctx, study, diviner.Success)
-	if err != nil {
-		log.Fatalf("error loading runs for study %s: %v", study.Name, err)
-	}
-	type trial struct {
-		diviner.Trial
-		Run diviner.Run
-	}
-	trials := make([]trial, len(runs))
-	for i, run := range runs {
-		trials[i].Run = run
-		trials[i].Trial.Values = run.Values()
-		trials[i].Trial.Metrics, err = run.Metrics(ctx)
-		if err != nil {
-			log.Fatalf("error retrieving trial from run %s: %v", run, err)
-		}
-	}
-	// Print some study metadata.
-	var tw tabwriter.Writer
-	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
-	fmt.Fprintf(&tw, "# Study %q:\n", study.Name)
-	for _, param := range study.Params.Sorted() {
-		fmt.Fprintf(&tw, "#	param %s:	%s\n", param.Name, param)
-	}
-	fmt.Fprintf(&tw, "#	objective:	%s\n", study.Objective)
-	if err := tw.Flush(); err != nil {
-		log.Fatal(err)
-	}
-	// Filter out trials that do not have the objective metric.
-	// TODO(marius): check for this when performing the trials.
-	var j int
-	for _, trial := range trials {
-		if _, ok := trial.Metrics[study.Objective.Metric]; ok {
-			trials[j] = trial
-			j++
-		}
-	}
-	if j < len(trials) {
-		log.Printf("dropped %d trials due to missing metrics", len(trials)-j)
-	}
-	trials = trials[:j]
-	if len(trials) == 0 {
-		log.Print("no trials")
-		os.Exit(0)
-	}
-	sort.Slice(trials, func(i, j int) bool {
-		var (
-			mi = trials[i].Metrics[study.Objective.Metric]
-			mj = trials[j].Metrics[study.Objective.Metric]
-		)
-		switch study.Objective.Direction {
-		case diviner.Maximize:
-			return mj < mi
-		case diviner.Minimize:
-			return mi < mj
-		default:
-			panic(study.Objective.Direction)
-		}
-	})
-	params := make([]string, 0, len(study.Params))
-	for key := range study.Params {
-		params = append(params, key)
-	}
-	sort.Strings(params)
-	allMetrics := make(map[string]bool)
-	for _, trial := range trials {
-		for key := range trial.Metrics {
-			if key != study.Objective.Metric {
-				allMetrics[key] = true
-			}
-		}
-	}
-	metrics := make([]string, 0, len(allMetrics))
-	for key := range allMetrics {
-		metrics = append(metrics, key)
-	}
-	sort.Strings(metrics)
-
-	w := tsv.NewWriter(os.Stdout)
-	w.WriteString("run")
-	for _, key := range params {
-		w.WriteString(key)
-	}
-	w.WriteString(study.Objective.Metric)
-	for _, key := range metrics {
-		w.WriteString(key)
-	}
-	if err := w.EndLine(); err != nil {
-		log.Fatal(err)
-	}
-	for _, trial := range trials {
-		w.WriteString(trial.Run.ID())
-		for _, key := range params {
-			w.WriteString(trial.Values[key].String())
-		}
-		w.WriteFloat64(trial.Metrics[study.Objective.Metric], 'f', -1)
-		for _, key := range metrics {
-			if val, ok := trial.Metrics[key]; ok {
-				w.WriteFloat64(val, 'f', -1)
-			} else {
-				w.WriteString("NA")
-			}
-		}
-		if err := w.EndLine(); err != nil {
-			log.Fatal(err)
-		}
-	}
-	if err := w.Flush(); err != nil {
-		log.Fatal(err)
-	}
-}
-
-type studyPrinter interface {
-	Print(ctx context.Context, study diviner.Study, runs []diviner.Run)
-}
-
-type jsonRunPrinter struct{}
-
-func (*jsonRunPrinter) Print(ctx context.Context, study diviner.Study, runs []diviner.Run) {
-	type Run struct {
-		ID           string
-		State        string
-		Status       string
-		Params       map[string]interface{}
-		Metrics      map[string]float64
-		MetricsError string
-	}
-	type Dict struct {
-		Study diviner.Study
-		Runs  []Run
-	}
-	dict := Dict{Study: study}
-	for _, run := range runs {
-		r := Run{ID: run.ID(), Params: map[string]interface{}{}, Metrics: map[string]float64{}}
-		if s, err := run.Status(ctx); err != nil {
-			r.Status = "error: " + err.Error()
-		} else {
-			r.Status = s
-		}
-		r.State = run.State().String()
-		values := run.Values()
-		for key := range study.Params {
-			v, ok := values[key]
-			if !ok {
-				r.Params[key] = nil
-				continue
-			}
-			switch v.Kind() {
-			case diviner.Integer:
-				r.Params[key] = v.Int()
-			case diviner.Real:
-				r.Params[key] = v.Float()
-			case diviner.Str:
-				r.Params[key] = v.Str()
-			default:
-				panic(v)
-			}
-		}
-		if metrics, err := run.Metrics(ctx); err != nil {
-			r.MetricsError = err.Error()
-		} else {
-			r.Metrics = metrics
-		}
-		dict.Runs = append(dict.Runs, r)
-	}
-	e := json.NewEncoder(os.Stdout)
-	e.SetIndent("", "  ")
-	e.Encode(dict)
-}
-
-type tabularRunPrinter struct{}
-
-func (*tabularRunPrinter) Print(ctx context.Context, study diviner.Study, runs []diviner.Run) {
-	fmt.Printf("study %s: %s\n", study.Name, study.Params)
-	sorted := make([]string, 0, len(study.Params))
-	for key := range study.Params {
-		sorted = append(sorted, key)
-	}
-	sort.Strings(sorted)
-	var tw tabwriter.Writer
-	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
-	io.WriteString(&tw, "id\t")
-	io.WriteString(&tw, strings.Join(sorted, "\t"))
-	fmt.Fprintln(&tw, "\tmetrics\tstatus")
-	for _, run := range runs {
-		row := make([]string, len(sorted)+3)
-		row[0] = fmt.Sprint(run.ID())
-		status, err := run.Status(ctx)
-		if err != nil {
-			row[len(row)-1] = err.Error()
-		} else {
-			row[len(row)-1] = status
-		}
-		values := run.Values()
-		for i, key := range sorted {
-			if v, ok := values[key]; ok {
-				row[i+1] = v.String()
-			} else {
-				row[i+1] = "NA"
-			}
-		}
-		if metrics, err := run.Metrics(ctx); err != nil {
-			row[len(row)-2] = err.Error()
-		} else if len(metrics) == 0 {
-			row[len(row)-2] = "NA"
-		} else {
-			keys := make([]string, 0, len(metrics))
-			for key := range metrics {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			elems := make([]string, len(keys))
-			for i, key := range keys {
-				elems[i] = fmt.Sprintf("%s=%f", key, metrics[key])
-			}
-			row[len(row)-2] = strings.Join(elems, ",")
-		}
-		io.WriteString(&tw, strings.Join(row, "\t"))
-		fmt.Fprintln(&tw)
-	}
-	tw.Flush()
-}
-
-func ps(db diviner.Database, studies []diviner.Study, args []string) {
+func leaderboard(db diviner.Database, args []string) {
 	var (
-		flags  = flag.NewFlagSet("run", flag.ExitOnError)
-		any    = flags.Bool("a", false, "show runs with any status, either pending, completed or failed")
-		format = flags.String("format", "tabular", "Output format. \"tabular\" prints in tabular format, \"json\" outputs in JSON.")
+		flags             = flag.NewFlagSet("leaderboard", flag.ExitOnError)
+		objectiveOverride = flags.String("objective", "", "objective to use instead of studies' shared objective")
+		numEntries        = flags.Int("n", 10, "number of top trials to display")
+		valuesRe          = flags.String("values", "^$", "regular expression matching parameter values to display")
+		metricsRe         = flags.String("metrics", "^$", "regular expression matching additional metrics to display")
 	)
+	flags.Usage = func() {
+		fmt.Fprintln(os.Stderr, `usage: diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...
+
+Leaderboard displays the top N performing trials from the matched
+studies, as defined by the objective shared by the studies. This
+objective may be overridden via the -objective flag (which accepts a
+metric name, prefixed by "+" or "-" to indicate a maximizing or
+minimizing objective respectively). By default the runs and their
+score obtained by the objective metric is displayed; additional
+metrics as well as run parameter values may be displayed by
+specifying regular expressions for matching them via the flags
+-metrics and -values.`)
+		flags.PrintDefaults()
+		os.Exit(2)
+	}
 	if err := flags.Parse(args); err != nil {
 		log.Fatal(err)
 	}
-	if flags.NArg() > 0 {
-		keep := make(map[string]bool)
-		for _, study := range flags.Args() {
-			keep[study] = true
-		}
-		var n int
-		for _, study := range studies {
-			if keep[study.Name] {
-				studies[n] = study
-				n++
-			}
-		}
-		studies = studies[:n]
+	if flags.NArg() == 0 {
+		flags.Usage()
 	}
 	ctx := context.Background()
+	studies := studies(ctx, db, flags.Args())
 	if len(studies) == 0 {
-		log.Printf("no studies")
-		return
+		log.Fatal("no studies matched")
 	}
-	var printer studyPrinter
-	switch *format {
-	case "tabular":
-		printer = &tabularRunPrinter{}
-	case "json":
-		printer = &jsonRunPrinter{}
-	default:
-		log.Fatalf("invalid output format '%s'", *format)
+	objective := studies[0].Objective
+	if *objectiveOverride == "" {
+		for i := range studies {
+			if i > 0 && studies[i].Objective != studies[i-1].Objective {
+				log.Fatalf("studies %s and %s do not share objectives: override with -objective",
+					studies[i].Name, studies[i-1].Name)
+			}
+		}
+	} else {
+		switch {
+		case strings.HasPrefix(*objectiveOverride, "-"):
+			objective.Direction = diviner.Minimize
+			objective.Metric = (*objectiveOverride)[1:]
+		case strings.HasPrefix(*objectiveOverride, "+"):
+			objective.Direction = diviner.Maximize
+			objective.Metric = (*objectiveOverride)[1:]
+		default:
+			log.Fatalf("invalid objective %s: must start with + or -", *objectiveOverride)
+		}
 	}
-	runs := make([][]diviner.Run, len(studies))
-	status := diviner.Pending
-	if *any {
-		status = diviner.Any
-	}
-	err := traverse.Each(len(runs), func(i int) (err error) {
-		runs[i], err = db.Runs(ctx, studies[i], status)
+	studyRuns := make([][]diviner.Run, len(studies))
+	err := traverser.Each(len(studyRuns), func(i int) (err error) {
+		studyRuns[i], err = db.Runs(ctx, studies[i].Name, diviner.Success)
 		return
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	for i, runs := range runs {
-		if len(runs) == 0 {
+
+	type runMetrics struct {
+		diviner.Study
+		diviner.Run
+		diviner.Metrics
+	}
+	var runs []runMetrics
+	for i, list := range studyRuns {
+		for _, run := range list {
+			runs = append(runs, runMetrics{Study: studies[i], Run: run})
+		}
+	}
+	err = traverser.Each(len(runs), func(i int) (err error) {
+		runs[i].Metrics, err = runs[i].Run.Metrics(ctx)
+		return
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	var (
+		n       int
+		values  = make(map[string]bool)
+		metrics = make(map[string]bool)
+	)
+	for _, run := range runs {
+		if _, ok := run.Metrics[objective.Metric]; !ok {
 			continue
 		}
-		printer.Print(ctx, studies[i], runs)
+		runs[n] = run
+		n++
+		for name := range run.Metrics {
+			metrics[name] = true
+		}
+		for name := range run.Values() {
+			values[name] = true
+		}
 	}
+	if n < len(runs) {
+		log.Printf("skipping %d runs due to missing metrics", len(runs)-n)
+	}
+	sort.SliceStable(runs, func(i, j int) bool {
+		iv, jv := runs[i].Metrics[objective.Metric], runs[j].Metrics[objective.Metric]
+		switch objective.Direction {
+		case diviner.Maximize:
+			return jv < iv
+		case diviner.Minimize:
+			return iv < jv
+		default:
+			panic(objective)
+		}
+	})
+	if *numEntries > 0 && len(runs) > *numEntries {
+		runs = runs[:*numEntries]
+	}
+	delete(metrics, objective.Metric)
+	var (
+		metricsOrdered = filterAndSort(metrics, *metricsRe)
+		valuesOrdered  = filterAndSort(values, *valuesRe)
+		tw             tabwriter.Writer
+	)
+	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
+	fmt.Fprintf(&tw, "run\t%s", objective.Metric)
+	if len(metricsOrdered) > 0 {
+		fmt.Fprint(&tw, "\t"+strings.Join(metricsOrdered, "\t"))
+	}
+	if len(valuesOrdered) > 0 {
+		fmt.Fprint(&tw, "\t"+strings.Join(valuesOrdered, "\t"))
+	}
+	fmt.Fprintln(&tw)
+	for _, run := range runs {
+		fmt.Fprintf(&tw, "%s:%s\t%.4g", run.Study.Name, run.Run.ID(), run.Metrics[objective.Metric])
+		if len(metricsOrdered) > 0 {
+			metrics := make([]string, len(metricsOrdered))
+			for i, name := range metricsOrdered {
+				if v, ok := run.Metrics[name]; ok {
+					metrics[i] = fmt.Sprintf("%.3g", v)
+				} else {
+					metrics[i] = "NA"
+				}
+			}
+			fmt.Fprint(&tw, "\t"+strings.Join(metrics, "\t"))
+		}
+		if len(valuesOrdered) > 0 {
+			values := make([]string, len(valuesOrdered))
+			for i, name := range valuesOrdered {
+				if v, ok := run.Values()[name]; ok {
+					switch v.Kind() {
+					default:
+						values[i] = fmt.Sprint(v)
+					case diviner.Real:
+						values[i] = fmt.Sprintf("%.3g", v.Float())
+					case diviner.Str:
+						values[i] = fmt.Sprintf("%q", v.Str())
+					}
+				} else {
+					values[i] = "NA"
+				}
+			}
+			fmt.Fprint(&tw, "\t"+strings.Join(values, "\t"))
+		}
+		fmt.Fprintln(&tw)
+	}
+	tw.Flush()
 }
 
 func logs(db diviner.Database, args []string) {
@@ -689,19 +741,85 @@ func logs(db diviner.Database, args []string) {
 		flags  = flag.NewFlagSet("logs", flag.ExitOnError)
 		follow = flags.Bool("f", false, "follow the log: print updates as they are appended")
 	)
+	flags.Usage = func() {
+		fmt.Fprintf(os.Stderr, `usage: diviner logs [-f] run
+
+Logs writes a run's logs to standard output. If the -f flag is given,
+the logs is followed and updates are printed as they become available.
+`)
+		flags.PrintDefaults()
+		os.Exit(2)
+	}
 	if err := flags.Parse(args); err != nil {
 		log.Fatal(err)
 	}
 	if flags.NArg() != 1 {
 		flags.Usage()
-		os.Exit(2)
 	}
 	ctx := context.Background()
-	run, err := db.Run(ctx, flags.Arg(0))
+	parts := strings.SplitN(flags.Arg(0), ":", 2)
+	if len(parts) != 2 {
+		log.Fatalf("invalid run name %s", flags.Arg(0))
+	}
+	run, err := db.Run(ctx, parts[0], parts[1])
 	if err != nil {
 		log.Fatalf("error retrieving run %s: %v", flags.Arg(0), err)
 	}
 	if _, err := io.Copy(os.Stdout, run.Log(*follow)); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func studies(ctx context.Context, db diviner.Database, args []string) []diviner.Study {
+	get := func(prefix string) []diviner.Study {
+		studies, err := db.Studies(ctx, prefix)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return studies
+	}
+	var studies []diviner.Study
+	for _, arg := range args {
+		re, err := regexp.Compile(`^` + arg + `$`)
+		if err != nil {
+			log.Fatal(err)
+		}
+		// TODO(marius): make point query if complete
+		prefix, _ := re.LiteralPrefix()
+		matched := get(prefix)
+		for _, study := range matched {
+			if re.MatchString(study.Name) {
+				studies = append(studies, study)
+			}
+		}
+	}
+	if len(studies) == 0 {
+		return nil
+	}
+	sort.SliceStable(studies, func(i, j int) bool { return studies[i].Name < studies[j].Name })
+	var n int
+	for i := range studies {
+		if studies[n].Name != studies[i].Name {
+			n++
+		}
+		studies[n] = studies[i]
+	}
+	return studies[:n+1]
+}
+
+func filterAndSort(keys map[string]bool, match string) []string {
+	re, err := regexp.Compile(match)
+	if err != nil {
+		log.Fatal(err)
+	}
+	sorted := make([]string, 0, len(keys))
+	for k := range keys {
+		if !re.MatchString(k) {
+			delete(keys, k)
+			continue
+		}
+		sorted = append(sorted, k)
+	}
+	sort.Strings(sorted)
+	return sorted
 }

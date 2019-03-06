@@ -7,6 +7,7 @@ package diviner
 import (
 	"context"
 	"io"
+	"time"
 )
 
 // RunState describes the current state of a particular run.
@@ -64,6 +65,12 @@ type Run interface {
 	SetStatus(ctx context.Context, message string) error
 	// Status
 	Status(ctx context.Context) (string, error)
+	// Created returns the time the run was created by the user.
+	Created() time.Time
+	// Runtime returns the run's runtime. Only valid when status != Pending.
+	Runtime() time.Duration
+	// Config returns the run's configuration.
+	Config() RunConfig
 	// Values returns the values that are computed by this run.
 	Values() Values
 	// Metrics returns the most recent metrics for this run. If the
@@ -74,7 +81,7 @@ type Run interface {
 	// Complete is called when the run has completed and no more
 	// metrics or logs will be reported. The run is marked as the given state
 	// (which cannot be Pending).
-	Complete(ctx context.Context, state RunState) error
+	Complete(ctx context.Context, state RunState, runtime time.Duration) error
 	// Log returns a reader from which the run's log messages may
 	// be read from persistent storage. If follow is true, the returned
 	// reader streams ongoing log updates indefinitely.
@@ -83,11 +90,18 @@ type Run interface {
 
 // A Database is used to track studies and their results.
 type Database interface {
+	// Study looks up a study by name.
+	Study(ctx context.Context, name string) (Study, error)
+	// Studies returns all the studies stored in this database with the provided prefix.
+	// Note that the returned studies may not be instantiable.
+	Studies(ctx context.Context, prefix string) ([]Study, error)
+
 	// New creates a new run in pending state. The caller can then
 	// update the run's metrics and complete it once it has finished.
-	New(ctx context.Context, study Study, values Values) (Run, error)
+	New(ctx context.Context, study Study, values Values, config RunConfig) (Run, error)
+
 	// Runs returns all runs in the study with the provided run states.
-	Runs(ctx context.Context, study Study, states RunState) ([]Run, error)
-	// Run looks up a single run by its run ID.
-	Run(ctx context.Context, id string) (Run, error)
+	Runs(ctx context.Context, study string, states RunState) ([]Run, error)
+	// Run looks up a single run by its identifier (study, run).
+	Run(ctx context.Context, study, id string) (Run, error)
 }

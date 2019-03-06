@@ -73,8 +73,7 @@
 //		             to be optimized;
 //		- run:       a function that returns a run_config for a set
 //		             of parameter values; the first argument to the function
-//		             is a dictionary of parameter values, the optional second
-//		             argument is a string uniquely identifying the run.
+//		             is a dictionary of parameter values.
 //		- oracle:    the oracle to use (grid search by default).
 //
 //	grid_search
@@ -141,15 +140,13 @@ func init() {
 // the provided filename.
 //
 // Load provides the builtins describes in the package documentation.
-func Load(filename string, src interface{}) ([]diviner.Study, Config, error) {
+func Load(filename string, src interface{}) ([]diviner.Study, error) {
 	thread := &starlark.Thread{
 		Name:  "diviner",
 		Print: func(_ *starlark.Thread, msg string) { log.Printf("%s: %s", filename, msg) },
 	}
 	var studies []diviner.Study
 	thread.SetLocal("studies", &studies)
-	var config Config
-	thread.SetLocal("config", &config)
 	builtins := starlark.StringDict{
 		"discrete":    starlark.NewBuiltin("discrete", makeDiscrete),
 		"range":       starlark.NewBuiltin("range", makeRange),
@@ -174,7 +171,7 @@ func Load(filename string, src interface{}) ([]diviner.Study, Config, error) {
 	for _, study := range studies {
 		study.Freeze()
 	}
-	return studies, config, err
+	return studies, err
 }
 
 type oracleValue struct{ diviner.Oracle }
@@ -294,7 +291,7 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 			return nil, fmt.Errorf("parameter %s is not a valid parameter", string(keystr))
 		}
 	}
-	study.Run = func(vals diviner.Values, ident string) (diviner.RunConfig, error) {
+	study.Run = func(vals diviner.Values) (diviner.RunConfig, error) {
 		var input starlark.Dict
 		for key, value := range vals {
 			var val starlark.Value
@@ -310,11 +307,10 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 			}
 			input.SetKey(starlark.String(key), val)
 		}
-		args := starlark.Tuple{&input}
-		if runner.NumParams() > 1 {
-			args = append(args, starlark.String(ident))
+		thread := &starlark.Thread{
+			Name: "diviner",
 		}
-		val, err := starlark.Call(thread, runner, args, nil)
+		val, err := starlark.Call(thread, runner, starlark.Tuple{&input}, nil)
 		if err != nil {
 			return diviner.RunConfig{}, err
 		}
@@ -413,26 +409,7 @@ func makeSkopt(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 }
 
 func makeConfig(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var database, table string
-	err := starlark.UnpackArgs(
-		"config", args, kwargs,
-		"database", &database,
-		"table", &table,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	config := thread.Local("config").(*Config)
-	switch database {
-	case "dynamodb":
-		config.Database = DynamoDB
-	case "local":
-		config.Database = Local
-	default:
-		return nil, fmt.Errorf("invalid database %s", database)
-	}
-	config.Table = table
+	log.Error.Printf("%s: config is deprecated and will be ignored", thread.Caller().Position())
 	return starlark.None, nil
 }
 

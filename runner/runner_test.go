@@ -54,7 +54,7 @@ func TestRunner(t *testing.T) {
 		Params: diviner.Params{
 			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1), diviner.Int(2)),
 		},
-		Run: func(values diviner.Values, ident string) (diviner.RunConfig, error) {
+		Run: func(values diviner.Values) (diviner.RunConfig, error) {
 			return diviner.RunConfig{
 				System:   system,
 				Datasets: []diviner.Dataset{dataset},
@@ -85,7 +85,7 @@ func TestRunner(t *testing.T) {
 	if !done {
 		t.Fatal("not done")
 	}
-	runs, err := db.Runs(ctx, study, diviner.Success)
+	runs, err := db.Runs(ctx, study.Name, diviner.Success)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestRunnerError(t *testing.T) {
 		Params: diviner.Params{
 			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1)),
 		},
-		Run: func(values diviner.Values, ident string) (diviner.RunConfig, error) {
+		Run: func(values diviner.Values) (diviner.RunConfig, error) {
 			config := diviner.RunConfig{
 				System: system,
 				Script: "echo the_status; exit 1",
@@ -174,14 +174,14 @@ func TestRunnerError(t *testing.T) {
 	if done {
 		t.Error("should not be done")
 	}
-	runs, err := db.Runs(ctx, study, diviner.Success)
+	runs, err := db.Runs(ctx, study.Name, diviner.Success)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := len(runs), 0; got != want {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	runs, err = db.Runs(ctx, study, diviner.Failure)
+	runs, err = db.Runs(ctx, study.Name, diviner.Failure)
 	if err != nil {
 		t.Fatal(err)
 	}

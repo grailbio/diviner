@@ -47,10 +47,26 @@ func (p Params) Sorted() []NamedParam {
 	return sorted
 }
 
+// A Metric is a single, named metric.
+type Metric struct {
+	Name  string
+	Value float64
+}
+
 // Metrics is a set of measurements output by black boxes. A subset
 // of metrics may be used in the optimization objective, but the set
 // of metrics may include others for diagnostic purposes.
 type Metrics map[string]float64
+
+// Sorted returns the metrics in m sorted by name.
+func (m Metrics) Sorted() []Metric {
+	metrics := make([]Metric, 0, len(m))
+	for k, v := range m {
+		metrics = append(metrics, Metric{k, v})
+	}
+	sort.Slice(metrics, func(i, j int) bool { return metrics[i].Name < metrics[j].Name })
+	return metrics
+}
 
 func (m Metrics) Equal(n Metrics) bool {
 	if len(m) != len(n) {
@@ -109,6 +125,18 @@ func (d Direction) String() string {
 		return "minimize"
 	case Maximize:
 		return "maximize"
+	default:
+		panic(d)
+	}
+}
+
+// Arrow returns a decorative arrow indicating the direction of d.
+func (d Direction) Arrow() string {
+	switch d {
+	case Maximize:
+		return "↑"
+	case Minimize:
+		return "↓"
 	default:
 		panic(d)
 	}
@@ -249,18 +277,17 @@ type Study struct {
 	Name string
 	// Objective is the objective to be maximized.
 	Objective Objective
-	// Oracle is the oracle used to pick parameter values.
-	Oracle Oracle `json:"-"` // TODO(marius): encode oracle name/type/params?
 	// Params is the set of parameters accepted by this
 	// study.
 	Params Params
+
+	// Oracle is the oracle used to pick parameter values.
+	Oracle Oracle `json:"-"` // TODO(marius): encode oracle name/type/params?
 	// Run is called with a set of Values (i.e., a concrete
 	// instantiation of values in the ranges as indicated by the black
 	// box parameters defined above); it produces a run configuration
 	// which is then used to conduct a trial of these parameter values.
-	// Ident is a unique string identifying the run. This can be used by
-	// the run to for example save run output keyed by the run id.
-	Run func(vals Values, ident string) (RunConfig, error) `json:"-"`
+	Run func(vals Values) (RunConfig, error) `json:"-"`
 }
 
 // String returns a textual description of the study.

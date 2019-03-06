@@ -79,6 +79,8 @@ type run struct {
 	statusMessage string
 	// Metrics stores the last reported metrics for the run.
 	metrics diviner.Metrics
+	// Time when the run first entered running state.
+	start time.Time
 }
 
 // Do performs the run using the provided runner after first coordinating
@@ -123,7 +125,9 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 		r.error(err)
 		return
 	}
-	start := time.Now()
+	r.mu.Lock()
+	r.start = time.Now()
+	r.mu.Unlock()
 	out, err := w.Run(ctx, r.Config.Script)
 	if err != nil {
 		r.errorf("failed to start script: %s", err)
@@ -181,7 +185,7 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 		log.Error.Printf("%s: flush: %v", r, err)
 	}
 
-	elapsed := time.Since(start)
+	elapsed := time.Since(r.start)
 	if err := scan.Err(); err == nil {
 		r.setStatus(statusOk, elapsed.String())
 	} else {
@@ -238,11 +242,15 @@ func (r *run) error(v ...interface{}) {
 	r.setStatus(statusErr, fmt.Sprint(v...))
 }
 
-// Status returns the run's current status and message.
-func (r *run) Status() (status, string) {
+// Status returns the run's current status and message, and elapsed runtime.
+func (r *run) Status() (status, string, time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.status, r.statusMessage
+	var elapsed time.Duration
+	if !r.start.IsZero() {
+		elapsed = time.Since(r.start)
+	}
+	return r.status, r.statusMessage, elapsed
 }
 
 // ScanProgress scans lines of output from a trial script, anticipating

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/grailbio/diviner"
 	"github.com/grailbio/diviner/localdb"
@@ -29,6 +30,14 @@ func TestDB(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	studies, err := db.Studies(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(studies), 0; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+
 	study := diviner.Study{
 		Name: "test1",
 		Params: diviner.Params{
@@ -40,12 +49,12 @@ func TestDB(t *testing.T) {
 	}
 
 	values := diviner.Values{"index": diviner.Int(0), "learning_rate": diviner.Float(0.5), "dropout": diviner.Float(0.05)}
-	run, err := db.New(ctx, study, values)
+	run, err := db.New(ctx, study, values, diviner.RunConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	run2, err := db.Run(ctx, run.ID())
+	run2, err := db.Run(ctx, "test1", run.ID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +85,7 @@ func TestDB(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 
-	runs, err := db.Runs(ctx, study, diviner.Any)
+	runs, err := db.Runs(ctx, study.Name, diviner.Any)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +97,11 @@ func TestDB(t *testing.T) {
 	}
 
 	for i := 1; i < N; i++ {
-		run, err := db.New(ctx, study, diviner.Values{"index": diviner.Int(i), "learning_rate": diviner.Float(0.5), "dropout": diviner.Float(0.05)})
+		var (
+			values = diviner.Values{"index": diviner.Int(i), "learning_rate": diviner.Float(0.5), "dropout": diviner.Float(0.05)}
+			config = diviner.RunConfig{}
+		)
+		run, err := db.New(ctx, study, values, config)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -97,12 +110,12 @@ func TestDB(t *testing.T) {
 		}
 	}
 
-	runs, err = db.Runs(ctx, study, diviner.Any)
+	runs, err = db.Runs(ctx, study.Name, diviner.Any)
 	if got, want := len(runs), N; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 	for _, run := range runs {
-		if err := run.Complete(ctx, diviner.Success); err != nil {
+		if err := run.Complete(ctx, diviner.Success, time.Second); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -154,6 +167,21 @@ func TestDB(t *testing.T) {
 	}
 	if !bytes.Equal(b.Bytes(), c.Bytes()) {
 		t.Error("log diff")
+	}
+
+	studies, err = db.Studies(ctx, "xxx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(studies), 0; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	studies, err = db.Studies(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(studies), 1; got != want {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 

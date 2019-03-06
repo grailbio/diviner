@@ -108,11 +108,11 @@ func (r *Runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		sort.Strings(sorted)
 		io.WriteString(&tw, "id\t")
 		io.WriteString(&tw, strings.Join(sorted, "\t"))
-		fmt.Fprintln(&tw, "\tmetrics\tstatus")
+		fmt.Fprintln(&tw, "\truntime\tmetrics\tstatus")
 
 		// TODO(marius): allow the user to pass in sort arguments, so that
 		// the status page can serve as a scoreboard.
-		row := make([]string, len(sorted)+4)
+		row := make([]string, len(sorted)+5)
 
 		for _, run := range r.runs[name] {
 			row[0] = fmt.Sprint(run.ID())
@@ -123,7 +123,7 @@ func (r *Runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 					row[i+1] = "NA"
 				}
 			}
-			status, message := run.Status()
+			status, message, elapsed := run.Status()
 			if metrics := run.Metrics(); len(metrics) > 0 {
 				keys := make([]string, 0, len(metrics))
 				for key := range metrics {
@@ -134,11 +134,12 @@ func (r *Runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				for i, key := range keys {
 					elems[i] = fmt.Sprintf("%s=%f", key, metrics[key])
 				}
-				row[len(row)-3] = strings.Join(elems, ",")
+				row[len(row)-4] = strings.Join(elems, ",")
 			} else {
-				row[len(row)-3] = "NA"
+				row[len(row)-4] = "NA"
 			}
 
+			row[len(row)-3] = elapsed.String()
 			row[len(row)-2] = status.String()
 			row[len(row)-1] = message
 			io.WriteString(&tw, "\t\t\t")
@@ -284,23 +285,23 @@ func (r *Runner) Loop(ctx context.Context) error {
 // of the run itself. The run is registered with the runner and will
 // show up in the various introspection facilities. Run
 func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Values) (diviner.Run, error) {
+	config, err := study.Run(values)
+	if err != nil {
+		return nil, err
+	}
 	run := new(run)
-	var err error
-	run.Run, err = r.db.New(ctx, study, values)
+	run.Run, err = r.db.New(ctx, study, values, config)
 	if err != nil {
 		return nil, err
 	}
 	run.Study = study
 	run.Values = values
-	run.Config, err = study.Run(values, run.ID())
-	if err != nil {
-		return nil, err
-	}
+	run.Config = config
 	r.add(run)
 	defer r.remove(run)
 	run.Do(ctx, r)
-	status, message := run.Status()
-	log.Printf("run %s: %s %s", run, status, message)
+	status, message, elapsed := run.Status()
+	log.Printf("run %s: %s %s %s", run, status, message, elapsed)
 	state := diviner.Failure
 	switch status {
 	case statusWaiting, statusRunning:
@@ -310,7 +311,7 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 	case statusErr:
 		log.Error.Printf("run %s error: %v", run, message)
 	}
-	if err := run.Complete(ctx, state); err != nil {
+	if err := run.Complete(ctx, state, elapsed); err != nil {
 		log.Error.Printf("failed to complete run %s: %v", run, err)
 		return nil, err
 	}
@@ -318,7 +319,7 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 }
 
 func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (done bool, err error) {
-	complete, err := r.db.Runs(ctx, study, diviner.Success)
+	complete, err := r.db.Runs(ctx, study.Name, diviner.Success)
 	if err != nil && err != localdb.ErrNoSuchStudy {
 		return false, err
 	}

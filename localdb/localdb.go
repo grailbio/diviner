@@ -18,10 +18,10 @@ import (
 	"io"
 	"io/ioutil"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/grailbio/base/log"
 	"github.com/grailbio/diviner"
 	bolt "go.etcd.io/bbolt"
 )
@@ -73,8 +73,56 @@ func Open(filename string) (db *DB, err error) {
 	})
 }
 
+// Study implements diviner.Database.
+func (d *DB) Study(ctx context.Context, name string) (study diviner.Study, err error) {
+	err = d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(studiesKey)
+		if b == nil {
+			return ErrNoSuchStudy
+		}
+		b = b.Bucket([]byte(name))
+		if b == nil {
+			return ErrNoSuchStudy
+		}
+		if ok, err := get(b, metaKey, &study); err != nil {
+			return err
+		} else if !ok {
+			return errors.New("inconsistent database")
+		}
+		return nil
+	})
+
+	return
+}
+
+// Studies implements diviner.Database.
+func (d *DB) Studies(ctx context.Context, prefix string) (studies []diviner.Study, err error) {
+	err = d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(studiesKey)
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		for k, v := c.Seek([]byte(prefix)); k != nil && bytes.HasPrefix(k, []byte(prefix)); k, v = c.Next() {
+			if v != nil {
+				log.Error.Printf("database contains non-bucket key study key %s", k)
+				continue
+			}
+			var study diviner.Study
+			if ok, err := get(b.Bucket(k), metaKey, &study); err != nil {
+				return err
+			} else if !ok {
+				return errors.New("inconsistent database")
+			}
+			studies = append(studies, study)
+		}
+		return nil
+	})
+	return
+}
+
 // New implements diviner.Database.
-func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values) (diviner.Run, error) {
+func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values, config diviner.RunConfig) (diviner.Run, error) {
 	run := new(run)
 	err := d.db.Update(func(tx *bolt.Tx) (e error) {
 		b := tx.Bucket(studiesKey).Bucket([]byte(study.Name))
@@ -83,7 +131,7 @@ func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values
 			if b, err = tx.Bucket(studiesKey).CreateBucket([]byte(study.Name)); err != nil {
 				return err
 			}
-			if err := put(b, metaKey, study.Params); err != nil {
+			if err := put(b, metaKey, study); err != nil {
 				return err
 			}
 		}
@@ -94,6 +142,12 @@ func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values
 		run.Seq, _ = b.NextSequence()
 		run.Study = study.Name
 		run.RunValues = values
+		// TODO(marius): include the rest of the run config as well.
+		// We should also clearly delineate in diviner's data structures
+		// which parts are dynamic/serializable and which contain state
+		// that cannot be serialized.
+		run.RunConfig = config
+		run.RunCreated = time.Now()
 		run.init(d.db)
 		if _, err = b.CreateBucketIfNotExists(run.seq()); err != nil {
 			return err
@@ -110,27 +164,23 @@ func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values
 }
 
 // Run implements diviner.Database.
-func (d *DB) Run(ctx context.Context, id string) (diviner.Run, error) {
-	parts := strings.SplitN(id, "/", 2)
-	if len(parts) != 2 || parts[0] == "" {
-		return nil, ErrInvalidRunId
-	}
-	seq, err := strconv.ParseUint(parts[1], 10, 64)
+func (d *DB) Run(ctx context.Context, study, id string) (diviner.Run, error) {
+	seq, err := strconv.ParseUint(id, 10, 64)
 	if err != nil {
 		return nil, ErrInvalidRunId
 	}
 	run := &run{
 		Seq:   seq,
-		Study: parts[0],
+		Study: study,
 	}
 	run.init(d.db)
 	return run, d.db.View(run.unmarshal)
 }
 
 // Runs implements diviner.Database.
-func (d *DB) Runs(ctx context.Context, study diviner.Study, states diviner.RunState) (runs []diviner.Run, err error) {
+func (d *DB) Runs(ctx context.Context, study string, states diviner.RunState) (runs []diviner.Run, err error) {
 	err = d.db.View(func(tx *bolt.Tx) error {
-		b := bucket(tx, studiesKey, []byte(study.Name))
+		b := bucket(tx, studiesKey, []byte(study))
 		if b == nil {
 			return ErrNoSuchStudy
 		}
@@ -143,7 +193,7 @@ func (d *DB) Runs(ctx context.Context, study diviner.Study, states diviner.RunSt
 		return b.ForEach(func(k, v []byte) error {
 			run := &run{
 				Seq:   seq(k),
-				Study: study.Name,
+				Study: study,
 			}
 			run.init(d.db)
 			if err := run.unmarshal(tx); err != nil {
@@ -162,10 +212,13 @@ func (d *DB) Runs(ctx context.Context, study diviner.Study, states diviner.RunSt
 
 // A run represents a single Diviner run. It implements diviner.Run.
 type run struct {
-	Seq       uint64
-	Study     string
-	RunValues diviner.Values
-	RunState  diviner.RunState
+	Seq        uint64
+	Study      string
+	RunValues  diviner.Values
+	RunState   diviner.RunState
+	RunConfig  diviner.RunConfig
+	RunCreated time.Time
+	RunRuntime time.Duration
 
 	db *bolt.DB
 	wr *bufio.Writer
@@ -237,7 +290,7 @@ func (r *run) Flush() error {
 
 // ID returns a unique identifier for this run in its database.
 func (r *run) ID() string {
-	return fmt.Sprintf("%s/%d", r.Study, r.Seq)
+	return fmt.Sprint(r.Seq)
 }
 
 // State implemnets diviner.Run.
@@ -272,6 +325,15 @@ func (r *run) Status(ctx context.Context) (string, error) {
 	return r.status, nil
 }
 
+// Created implements diviner.Run.
+func (r *run) Created() time.Time { return r.RunCreated }
+
+// Runtime implements diviner.Run.
+func (r *run) Runtime() time.Duration { return r.RunRuntime }
+
+// Config implements diviner.Run.
+func (r *run) Config() diviner.RunConfig { return r.RunConfig }
+
 // Values implements diviner.Run.
 func (r *run) Values() diviner.Values {
 	return r.RunValues
@@ -296,13 +358,18 @@ func (r *run) Metrics(ctx context.Context) (metrics diviner.Metrics, err error) 
 }
 
 // Complete implements diviner.Run.
-func (r *run) Complete(ctx context.Context, state diviner.RunState) error {
+func (r *run) Complete(ctx context.Context, state diviner.RunState, runtime time.Duration) error {
 	return r.db.Update(func(tx *bolt.Tx) error {
-		save := r.RunState
+		var (
+			saveState   = r.RunState
+			saveRuntime = r.RunRuntime
+		)
 		r.RunState = state
+		r.RunRuntime = runtime
 		err := r.marshal(tx)
 		if err != nil {
-			r.RunState = save
+			r.RunState = saveState
+			r.RunRuntime = saveRuntime
 		}
 		return err
 	})

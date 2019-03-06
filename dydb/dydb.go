@@ -31,7 +31,15 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const keepaliveInterval = 30 * time.Second
+// TODO(marius): get rid of using gob here; either encode data directly in dynamoDB
+// attributes or use JSON.
+
+const (
+	keepaliveInterval = 30 * time.Second
+	// The time layout used to store timestamps in dynamodb.
+	// RFC3339 timestamps order lexically.
+	timeLayout = time.RFC3339
+)
 
 var logGroups once.Map
 
@@ -52,8 +60,74 @@ func New(sess *session.Session, table string) *DB {
 	}
 }
 
+// Study implements diviner.Database.
+func (d *DB) Study(ctx context.Context, name string) (study diviner.Study, err error) {
+	out, err := d.db.GetItemWithContext(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(d.table),
+		Key: map[string]*dynamodb.AttributeValue{
+			"study": {S: aws.String(name)},
+			"run":   {N: aws.String("0")},
+		},
+	})
+	if err != nil {
+		return
+	}
+	err = gob.NewDecoder(bytes.NewReader(out.Item["meta"].B)).Decode(&study)
+	return
+}
+
+// Studies implements diviner.Database.
+func (d *DB) Studies(ctx context.Context, prefix string) ([]diviner.Study, error) {
+	input := &dynamodb.ScanInput{
+		TableName:                aws.String(d.table),
+		FilterExpression:         aws.String(`attribute_exists(#meta)`),
+		ExpressionAttributeNames: attributeNames("meta"),
+	}
+	if prefix != "" {
+		input.FilterExpression = aws.String(*input.FilterExpression + ` AND begins_with(#study, :prefix)`)
+		input.ExpressionAttributeValues = map[string]*dynamodb.AttributeValue{
+			":prefix": {S: aws.String(prefix)},
+		}
+		for k, v := range attributeNames("study") {
+			input.ExpressionAttributeNames[k] = v
+		}
+	}
+	var (
+		studies []diviner.Study
+		lastKey map[string]*dynamodb.AttributeValue
+	)
+	for {
+		filters := []string{`attribute_exists(#meta)`}
+		if prefix != "" {
+			filters = append(filters, ``)
+		}
+		if lastKey != nil {
+			input.ExclusiveStartKey = lastKey
+		}
+		log.Debug.Printf("dynamodb: query: %s", input)
+		out, err := d.db.ScanWithContext(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range out.Items {
+			var study diviner.Study
+			p := item["meta"].B
+			if err := gob.NewDecoder(bytes.NewReader(p)).Decode(&study); err != nil {
+				log.Error.Printf("skipping invalid study %s: %v", aws.StringValue(item["study"].S), err)
+				continue
+			}
+			studies = append(studies, study)
+		}
+		lastKey = out.LastEvaluatedKey
+		if lastKey == nil {
+			break
+		}
+	}
+	return studies, nil
+}
+
 // New implements diviner.Database.
-func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values) (diviner.Run, error) {
+func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values, config diviner.RunConfig) (diviner.Run, error) {
 	var b bytes.Buffer
 	if err := gob.NewEncoder(&b).Encode(values); err != nil {
 		return nil, err
@@ -62,7 +136,14 @@ func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values
 	if err != nil {
 		return nil, err
 	}
-	startTime := time.Now().UTC().Format(time.RFC3339)
+	var configBuf bytes.Buffer
+	if err := gob.NewEncoder(&configBuf).Encode(config); err != nil {
+		return nil, err
+	}
+	// TODO(marius): verify that studies are compatible: that both the
+	// names and actual study metadata matches.
+	now := time.Now().UTC()
+	startTime := now.Format(timeLayout)
 	_, err = d.db.PutItem(&dynamodb.PutItemInput{
 		TableName: aws.String(d.table),
 		Item: map[string]*dynamodb.AttributeValue{
@@ -75,6 +156,10 @@ func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values
 			"state":     {S: aws.String(diviner.Pending.String())},
 			"timestamp": {S: aws.String(startTime)},
 			"keepalive": {S: aws.String(startTime)},
+			// TODO(marius): include a "frozen" config (e.g., where the files
+			// include checksums, etc.), so that we can re-create the config
+			// independently of local disk state.
+			"config": {B: configBuf.Bytes()},
 		},
 	})
 	if err != nil {
@@ -89,6 +174,8 @@ func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values
 		studyName: study.Name,
 		seq:       seq,
 		state:     diviner.Pending,
+		config:    config,
+		created:   now,
 		cancel:    cancel,
 		statusc:   make(chan string, 1),
 	}
@@ -98,7 +185,7 @@ func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values
 }
 
 // Runs implements diviner.Database.
-func (d *DB) Runs(ctx context.Context, study diviner.Study, states diviner.RunState) (runs []diviner.Run, err error) {
+func (d *DB) Runs(ctx context.Context, study string, states diviner.RunState) (runs []diviner.Run, err error) {
 	minPendingTime := time.Now().Add(-2 * keepaliveInterval).UTC().Format(time.RFC3339)
 	var lastKey map[string]*dynamodb.AttributeValue
 	for {
@@ -106,7 +193,7 @@ func (d *DB) Runs(ctx context.Context, study diviner.Study, states diviner.RunSt
 			TableName:        aws.String(d.table),
 			FilterExpression: aws.String(`#study = :study AND #run > :zero AND (#state <> :pending OR #keepalive > :min_pending_time)`),
 			ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-				":study":            {S: aws.String(study.Name)},
+				":study":            {S: aws.String(study)},
 				":zero":             {N: aws.String("0")},
 				":pending":          {S: aws.String("pending")},
 				":min_pending_time": {S: aws.String(minPendingTime)},
@@ -138,17 +225,12 @@ func (d *DB) Runs(ctx context.Context, study diviner.Study, states diviner.RunSt
 }
 
 // Run implements diviner.Database.
-func (d *DB) Run(ctx context.Context, id string) (diviner.Run, error) {
-	parts := strings.SplitN(id, "/", 3)
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("invalid run key %q", id)
-	}
-	table, study := parts[0], parts[1]
-	seq, err := strconv.ParseUint(parts[2], 10, 64)
+func (d *DB) Run(ctx context.Context, study, id string) (diviner.Run, error) {
+	seq, err := strconv.ParseUint(id, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("invalid run key %q: %v", id, err)
 	}
-	r := &run{sess: d.sess, db: d.db, table: table, seq: seq, studyName: study}
+	r := &run{sess: d.sess, db: d.db, table: d.table, seq: seq, studyName: study}
 	if err := r.get(); err != nil {
 		return nil, err
 	}
@@ -211,6 +293,9 @@ type run struct {
 	studyName string
 	seq       uint64
 	state     diviner.RunState
+	config    diviner.RunConfig
+	created   time.Time
+	runtime   time.Duration
 	cancel    func()
 
 	once   sync.Once
@@ -252,6 +337,9 @@ func (r *run) unmarshal(attrs map[string]*dynamodb.AttributeValue) error {
 	if state := attrs["state"]; state == nil || state.S == nil {
 		return errors.New("missing state")
 	}
+	if timestamp := attrs["timestamp"]; timestamp == nil || timestamp.S == nil {
+		return errors.New("missing timestamp")
+	}
 	r.studyName = *attrs["study"].S
 	var err error
 	r.seq, err = strconv.ParseUint(*attrs["run"].N, 10, 64)
@@ -272,6 +360,31 @@ func (r *run) unmarshal(attrs map[string]*dynamodb.AttributeValue) error {
 		log.Printf("run %s has unknown state %s", r, state)
 		r.state = 0
 	}
+	r.created, err = time.Parse(timeLayout, *attrs["timestamp"].S)
+	if err != nil {
+		return err
+	}
+	// Backwards compatibilty: set an empty config where it doesn't exist.
+	if attrs["config"] != nil && attrs["config"].B != nil {
+		if err := gob.NewDecoder(bytes.NewReader(attrs["config"].B)).Decode(&r.config); err != nil {
+			return err
+		}
+	}
+	// If we have a runtime, use it, otherwise we subtract
+	// the last keepalive time if we have it.
+	if attrs["runtime"] != nil && attrs["runtime"].S != nil {
+		r.runtime, err = time.ParseDuration(*attrs["runtime"].S)
+		if err != nil {
+			return err
+		}
+	} else if attrs["keepalive"] != nil && attrs["keepalive"].S != nil {
+		lastKeepalive, err := time.Parse(timeLayout, *attrs["keepalive"].S)
+		if err != nil {
+			return err
+		}
+		r.runtime = lastKeepalive.Sub(r.created)
+	}
+
 	return nil
 }
 
@@ -294,7 +407,7 @@ func (r *run) Flush() error {
 
 // ID implements diviner.Run.
 func (r *run) ID() string {
-	return fmt.Sprintf("%s/%s/%d", r.table, r.studyName, r.seq)
+	return fmt.Sprint(r.seq)
 }
 
 // State implements diviner.Run.
@@ -345,6 +458,21 @@ func (r *run) Status(ctx context.Context) (string, error) {
 	return aws.StringValue(status.S), nil
 }
 
+// Created implements diviner.Run.
+func (r *run) Created() time.Time {
+	return r.created
+}
+
+// Runtime implements diviner.Run.
+func (r *run) Runtime() time.Duration {
+	return r.runtime
+}
+
+// Config implements diviner.Run.
+func (r *run) Config() diviner.RunConfig {
+	return r.config
+}
+
 // Values implements diviner.Run.
 func (r *run) Values() diviner.Values {
 	return r.values
@@ -367,15 +495,16 @@ func (r *run) Metrics(ctx context.Context) (metrics diviner.Metrics, err error) 
 }
 
 // Complete implements diviner.Run.
-func (r *run) Complete(ctx context.Context, state diviner.RunState) error {
+func (r *run) Complete(ctx context.Context, state diviner.RunState, runtime time.Duration) error {
 	_, err := r.db.UpdateItemWithContext(ctx, &dynamodb.UpdateItemInput{
 		TableName:        aws.String(r.table),
 		Key:              r.key(),
-		UpdateExpression: aws.String(`SET #state = :state`),
+		UpdateExpression: aws.String(`SET #state = :state, #runtime = :runtime`),
 		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-			":state": {S: aws.String(state.String())},
+			":state":   {S: aws.String(state.String())},
+			":runtime": {S: aws.String(runtime.String())},
 		},
-		ExpressionAttributeNames: attributeNames("state"),
+		ExpressionAttributeNames: attributeNames("state", "runtime"),
 	})
 	if err == nil {
 		r.state = state

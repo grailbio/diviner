@@ -131,9 +131,25 @@ func (String) Int() int64 { panic("Int on String") }
 // Str implements Value.
 func (v String) Str() string { return string(v) }
 
+// A NamedValue is a value that is assigned a name.
+type NamedValue struct {
+	Name string
+	Value
+}
+
 // Values is a set of named value, used as a concrete instantiation
 // of a set of parameters.
 type Values map[string]Value
+
+// Sorted returns the values in v sorted by name.
+func (v Values) Sorted() []NamedValue {
+	vals := make([]NamedValue, 0, len(v))
+	for k, v := range v {
+		vals = append(vals, NamedValue{k, v})
+	}
+	sort.Slice(vals, func(i, j int) bool { return vals[i].Name < vals[j].Name })
+	return vals
+}
 
 func (v Values) Equal(w Values) bool {
 	if len(v) != len(w) {

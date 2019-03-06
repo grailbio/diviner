@@ -14,8 +14,11 @@ import (
 )
 
 func init() {
-	gob.Register(Range{})
-	gob.Register(Discrete{})
+	// These were mistakenly registered with value receivers,
+	// which gob happily accepted. We override these now
+	// so that these values decode successfully.
+	gob.RegisterName("github.com/grailbio/diviner.Range", &Range{})
+	gob.RegisterName("github.com/grailbio/diviner.Discrete", &Discrete{})
 }
 
 // A Param is a kind of parameter. Params determine the range of
@@ -36,6 +39,8 @@ type Param interface {
 	// directly in starlark configuration scripts.
 	starlark.Value
 }
+
+var _ Param = (*Discrete)(nil)
 
 // A Discrete is a parameter that takes on a finite set of values.
 type Discrete struct {
@@ -95,6 +100,8 @@ func (*Discrete) Truth() starlark.Bool { return true }
 
 // Hash implements starlark.Value.
 func (*Discrete) Hash() (uint32, error) { return 0, errNotHashable }
+
+var _ Param = (*Range)(nil)
 
 // Range is a parameter that is defined over a range of
 // real numbers.

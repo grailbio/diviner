@@ -155,14 +155,18 @@ func (w *worker) CopyFiles(ctx context.Context, files []string) error {
 // current working directory is set to the worker's command working
 // space. The returned io.ReadCloser is the processes' standard
 // output and standard error.
-func (w *worker) Run(ctx context.Context, script string) (io.ReadCloser, error) {
+func (w *worker) Run(ctx context.Context, script string, env []string) (io.ReadCloser, error) {
 	var out io.ReadCloser
 	// TODO(marius): allow EC2 bigmachine to run under the default user.
 	if ec2, ok := w.Session.System.System.(*ec2system.System); ok && ec2.Flavor == ec2system.Ubuntu {
 		script = PreambleUbuntu + script
 	}
 	script = Preamble + script
-	err := w.Call(ctx, "Cmd.Run", []string{"bash", "-c", script}, &out)
+	c := cmd{
+		Args: []string{"bash", "-c", script},
+		Env:  env,
+	}
+	err := w.Call(ctx, "Cmd.Run", c, &out)
 	return out, err
 }
 
@@ -182,6 +186,21 @@ func (w *worker) Err() error {
 
 func init() {
 	gob.Register(&commandService{})
+}
+
+// A cmd is a command sent to a commandService; it includes
+// the arguments of the command itself as well as environment
+// variables that should be amended to the processes' default
+// environment.
+type cmd struct {
+	// Args is the command arguments. Args[0] is the binary
+	// to run, which is looked up in the system's path.
+	Args []string
+	// Env is a list of environment definitions in the form of
+	// "key=value". The values in this environment is amended to the
+	// processes' default environment: variables that appear in Env
+	// override those in the default environment.
+	Env []string
 }
 
 // CommandService is a simple bigmachine service to run commands. A
@@ -226,8 +245,8 @@ func (c *commandService) WriteFile(ctx context.Context, file fileLiteral, _ *str
 //
 // TODO(marius): multiplex the streams to separate standard output from
 // standard error.
-func (c *commandService) Run(ctx context.Context, command []string, reply *io.ReadCloser) error {
-	if len(command) == 0 {
+func (c *commandService) Run(ctx context.Context, command cmd, reply *io.ReadCloser) error {
+	if len(command.Args) == 0 {
 		return errors.New("empty command")
 	}
 	// Connect the child's stdout/stderr to a terminal.  This will prevent the
@@ -240,7 +259,8 @@ func (c *commandService) Run(ctx context.Context, command []string, reply *io.Re
 	eg := errgroup.Group{}
 	eg.Go(func() error {
 		defer tty.Close()
-		cmd := exec.Command(command[0], command[1:]...)
+		cmd := exec.Command(command.Args[0], command.Args[1:]...)
+		cmd.Env = append(os.Environ(), command.Env...)
 		cmd.Stdout = tty
 		cmd.Stderr = tty
 		cmd.Dir = c.dir

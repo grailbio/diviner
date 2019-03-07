@@ -20,7 +20,7 @@ func TestCommand(t *testing.T) {
 	}
 
 	var out io.ReadCloser
-	if err := c.Run(ctx, []string{"bash", "-c", "exit 1"}, &out); err != nil {
+	if err := c.Run(ctx, cmd{Args: []string{"bash", "-c", "exit 1"}}, &out); err != nil {
 		t.Fatal(err)
 	}
 	_, err := io.Copy(ioutil.Discard, out)

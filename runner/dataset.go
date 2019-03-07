@@ -63,7 +63,7 @@ func (d *dataset) Do(ctx context.Context, runner *Runner) {
 		d.error(errors.E(fmt.Sprintf("dataset copyfiles %+v: %v", d.LocalFiles, err)))
 		return
 	}
-	out, err := w.Run(ctx, d.Script)
+	out, err := w.Run(ctx, d.Script, nil)
 	if err != nil {
 		d.error(errors.E(fmt.Sprintf("dataset: failed to start script '%s'", d.Script), err))
 		return

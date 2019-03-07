@@ -120,6 +120,12 @@
 //	  objective=maximize("acc"),
 //	)
 //
+// Scripts defined in a trial's run configuration are run on the specified
+// machine under its default user and environment. The environment
+// variable DIVINER_RUN_ID contains the trial's run id (in the form of
+// study_name:run_number) so that, for example, the script's output
+// may be persisted by the trial's name and looked up later.
+//
 // With a configuration in hand, the diviner tool is used to conduct trails,
 // and examine study results.
 //

@@ -193,6 +193,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"text/tabwriter"
 	"text/template"
@@ -211,6 +212,7 @@ import (
 	"github.com/grailbio/diviner/oracle"
 	"github.com/grailbio/diviner/runner"
 	"github.com/grailbio/diviner/script"
+	"golang.org/x/sync/errgroup"
 )
 
 func initS3() {
@@ -345,6 +347,7 @@ func list(db diviner.Database, args []string) {
 		listRuns = flags.Bool("runs", false, "list runs matching studies")
 		load     = flags.String("l", "", "load studies from the provided script file")
 		runState = flags.String("state", "pending,success,failure", "list of run states to query")
+		status   = flags.Bool("s", false, "show status for pending runs")
 	)
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, `usage:
@@ -410,12 +413,46 @@ the given study names.`)
 		log.Fatal("no run states given")
 	}
 	runs := make([][]diviner.Run, len(studies))
-	err := traverser.Each(len(studies), func(i int) (err error) {
+	err := traverser.Each(len(runs), func(i int) (err error) {
 		runs[i], err = db.Runs(ctx, studies[i].Name, state)
 		return err
 	})
 	if err != nil {
 		log.Fatal(err)
+	}
+	var statuses map[diviner.Run]string
+	if *status {
+		// TODO(marius): This way of querying for runs and statuses is a
+		// bit of a messy hodgepodge. We should provide a single way of
+		// querying studies and runs, and have a clear separation between
+		// update methods and query methods. This will allow us to push
+		// queries down where they can be efficiently executed.
+		statuses = make(map[diviner.Run]string)
+		var (
+			mu   sync.Mutex
+			g, _ = errgroup.WithContext(ctx)
+		)
+		for i := range runs {
+			for _, run := range runs[i] {
+				if run.State() == diviner.Pending {
+					run := run
+					g.Go(func() error {
+						status, err := run.Status(ctx)
+						if err != nil {
+							log.Error.Printf("%s: failed to retrieve status: %v", run, err)
+							return nil
+						}
+						mu.Lock()
+						defer mu.Unlock()
+						statuses[run] = status
+						return nil
+					})
+				}
+			}
+		}
+		if err := g.Wait(); err != nil {
+			log.Fatal(err)
+		}
 	}
 	now := time.Now()
 	for i, study := range studies {
@@ -427,9 +464,9 @@ the given study names.`)
 			case dur > 24*time.Hour:
 				layout = "Mon3:04PM"
 			}
-			fmt.Fprintf(&tw, "%s:%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(&tw, "%s:%s\t%s\t%s\t%s\t%s\n",
 				study.Name, run.ID(), run.Created().Local().Format(layout),
-				run.Runtime(), run.State())
+				run.Runtime(), run.State(), statuses[run])
 		}
 	}
 	tw.Flush()

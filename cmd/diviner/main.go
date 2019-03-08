@@ -10,23 +10,23 @@
 // own:
 //
 // - a parameter describes the type and range of values that can
-//   parameterize the process under optimization;
+// parameterize the process under optimization;
 //
 // - a value is a concrete value for a parameter;
 //
 // - a metric is a numeric value produced by the process under
-//   optimization;
+// optimization;
 //
 // - an objective is a metric to maximize or minimize;
 //
 // - a trial a set of values and the metrics that result from
-//   the process run under these values;
+// the process run under these values;
 //
 // - an oracle is an algorithm that picks a set of trials to
-//   perform given a history of trials;
+// perform given a history of trials;
 //
 // - a black box defines the process under optimization, namely:
-//   how to run a trial given a set of values; and finally
+// how to run a trial given a set of values; and finally
 //
 // - a study is a black box, an objective, and an oracle.
 //
@@ -132,6 +132,8 @@
 // Usage:
 //	diviner list [-runs] studies...
 //		List studies available studies or runs.
+//	diviner list -l script.dv studies...
+//		List studies available studies defined in script.dv.
 //	diviner info [-v] names...
 //		Display information for the given study or run names.
 //	diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...
@@ -146,6 +148,11 @@
 // diviner list [-runs] studies... lists the studies matching the regular
 // expressions given. If -runs is specified then the study's runs are
 // listed instead.
+//
+// diviner list -l script.dv studies... lists information for all of
+// the studies defined in the provided script matching the studies
+// regular expressions. If no patterns are provided, then all studies
+// are shown.
 //
 // diviner info [-v] names... displays detailed information about the
 // matching study or run names. If -v is given then even more verbose
@@ -164,6 +171,7 @@
 // each are performed for each of the studies that matches the
 // argument. If no studies are specified, all studies are run
 // concurrently.
+//
 //
 // diviner logs [-f] run writes logs from the named run to standard
 // output. If -f is given, the log is followed and updates are written
@@ -217,6 +225,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
 	diviner list [-runs] studies...
 		List studies available studies or runs.
+	diviner list -l script.dv studies...
+		List studies available studies defined in script.dv.
 	diviner info [-v] names...
 		Display information for the given study or run names.
 	diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...
@@ -333,10 +343,13 @@ func list(db diviner.Database, args []string) {
 	var (
 		flags    = flag.NewFlagSet("list", flag.ExitOnError)
 		listRuns = flags.Bool("runs", false, "list runs matching studies")
+		load     = flags.String("l", "", "load studies from the provided script file")
 		runState = flags.String("state", "pending,success,failure", "list of run states to query")
 	)
 	flags.Usage = func() {
-		fmt.Fprintln(os.Stderr, `usage: diviner list [-runs] studies...
+		fmt.Fprintln(os.Stderr, `usage:
+	diviner list [-runs] studies...
+	diviner list -l script.dv studies...
 
 List prints a summary overview of all studies (or runs) that match
 the given study names.`)
@@ -346,12 +359,32 @@ the given study names.`)
 	if err := flags.Parse(args); err != nil {
 		log.Fatal(err)
 	}
+	if *listRuns && *load != "" {
+		flags.Usage()
+	}
 	ctx := context.Background()
 	args = flags.Args()
 	if len(args) == 0 {
 		args = []string{".*"} // list all
 	}
-	studies := studies(ctx, db, args)
+	getter := databaseGetter(db)
+	if *load != "" {
+		getter = func(_ context.Context, prefix string) []diviner.Study {
+			studies, err := script.Load(*load, nil)
+			if err != nil {
+				log.Fatal(err)
+			}
+			var n int
+			for _, study := range studies {
+				if strings.HasPrefix(study.Name, prefix) {
+					studies[n] = study
+					n++
+				}
+			}
+			return studies[:n]
+		}
+	}
+	studies := studies(ctx, args, getter)
 	if !*listRuns {
 		for _, study := range studies {
 			fmt.Println(study.Name)
@@ -605,7 +638,7 @@ specifying regular expressions for matching them via the flags
 		flags.Usage()
 	}
 	ctx := context.Background()
-	studies := studies(ctx, db, flags.Args())
+	studies := studies(ctx, flags.Args(), databaseGetter(db))
 	if len(studies) == 0 {
 		log.Fatal("no studies matched")
 	}
@@ -776,14 +809,17 @@ the logs is followed and updates are printed as they become available.
 	}
 }
 
-func studies(ctx context.Context, db diviner.Database, args []string) []diviner.Study {
-	get := func(prefix string) []diviner.Study {
+func databaseGetter(db diviner.Database) func(context.Context, string) []diviner.Study {
+	return func(ctx context.Context, prefix string) []diviner.Study {
 		studies, err := db.Studies(ctx, prefix)
 		if err != nil {
 			log.Fatal(err)
 		}
 		return studies
 	}
+}
+
+func studies(ctx context.Context, args []string, get func(context.Context, string) []diviner.Study) []diviner.Study {
 	var studies []diviner.Study
 	for _, arg := range args {
 		re, err := regexp.Compile(`^` + arg + `$`)
@@ -792,7 +828,7 @@ func studies(ctx context.Context, db diviner.Database, args []string) []diviner.
 		}
 		// TODO(marius): make point query if complete
 		prefix, _ := re.LiteralPrefix()
-		matched := get(prefix)
+		matched := get(ctx, prefix)
 		for _, study := range matched {
 			if re.MatchString(study.Name) {
 				studies = append(studies, study)

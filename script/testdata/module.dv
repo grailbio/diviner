@@ -1,0 +1,8 @@
+local = localsystem("local", 1)
+
+def dummy_study(name):
+    study(name=name.strip(),
+          objective=minimize("x"),
+          params={"p0": discrete(1,2)},
+          run=lambda p: run_config(system=local, script="foo"),
+          oracle=grid_search)

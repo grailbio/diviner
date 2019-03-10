@@ -1,0 +1,3 @@
+load("module.dv", "dummy_study")
+
+dummy_study("test")

@@ -115,6 +115,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/grailbio/base/log"
@@ -134,6 +135,55 @@ func init() {
 	resolve.AllowRecursion = true
 }
 
+var builtins = starlark.StringDict{
+	"discrete":    starlark.NewBuiltin("discrete", makeDiscrete),
+	"range":       starlark.NewBuiltin("range", makeRange),
+	"minimize":    starlark.NewBuiltin("minimize", makeObjective(diviner.Minimize)),
+	"maximize":    starlark.NewBuiltin("maximize", makeObjective(diviner.Maximize)),
+	"dataset":     starlark.NewBuiltin("dataset", makeDataset),
+	"run_config":  starlark.NewBuiltin("run_config", makeRunConfig),
+	"study":       starlark.NewBuiltin("study", makeStudy),
+	"grid_search": &oracleValue{&oracle.GridSearch{}},
+	"skopt":       starlark.NewBuiltin("skopt", makeSkopt),
+	"config":      starlark.NewBuiltin("config", makeConfig),
+	"localsystem": starlark.NewBuiltin("localsystem", makeLocalSystem),
+	"ec2system":   starlark.NewBuiltin("ec2system", makeEC2System),
+	"command":     starlark.NewBuiltin("command", makeCommand),
+}
+
+func makeLoader(entrypoint string) func(thread *starlark.Thread, module string) (starlark.StringDict, error) {
+	type loadEntry struct {
+		globals starlark.StringDict
+		err     error
+	}
+	var (
+		cache   = make(map[string]*loadEntry)
+		basedir = filepath.Dir(entrypoint)
+	)
+	// Prevent cycles involving the main module.
+	cache[entrypoint] = nil
+
+	return func(thread *starlark.Thread, module string) (starlark.StringDict, error) {
+		var filename string
+		if caller := thread.Caller(); caller != nil {
+			filename = filepath.Join(filepath.Dir(thread.Caller().Position().Filename()), module)
+		} else {
+			filename = filepath.Join(basedir, module)
+		}
+		if e, ok := cache[filename]; ok {
+			if e == nil {
+				return nil, fmt.Errorf("cycle in load graph involving module %s", filename)
+			}
+			return e.globals, e.err
+		}
+		cache[filename] = nil
+		var e loadEntry
+		e.globals, e.err = starlark.ExecFile(thread, filename, nil, builtins)
+		cache[filename] = &e
+		return e.globals, e.err
+	}
+}
+
 // Load loads configuration from a Starlark script. Arguments are as
 // in Starlark's syntax.Parse: if src is not nil, it must be a byte
 // source ([]byte or io.Reader); if src is nil, data are parsed from
@@ -144,24 +194,10 @@ func Load(filename string, src interface{}) ([]diviner.Study, error) {
 	thread := &starlark.Thread{
 		Name:  "diviner",
 		Print: func(_ *starlark.Thread, msg string) { log.Printf("%s: %s", filename, msg) },
+		Load:  makeLoader(filename),
 	}
 	var studies []diviner.Study
 	thread.SetLocal("studies", &studies)
-	builtins := starlark.StringDict{
-		"discrete":    starlark.NewBuiltin("discrete", makeDiscrete),
-		"range":       starlark.NewBuiltin("range", makeRange),
-		"minimize":    starlark.NewBuiltin("minimize", makeObjective(diviner.Minimize)),
-		"maximize":    starlark.NewBuiltin("maximize", makeObjective(diviner.Maximize)),
-		"dataset":     starlark.NewBuiltin("dataset", makeDataset),
-		"run_config":  starlark.NewBuiltin("run_config", makeRunConfig),
-		"study":       starlark.NewBuiltin("study", makeStudy),
-		"grid_search": &oracleValue{&oracle.GridSearch{}},
-		"skopt":       starlark.NewBuiltin("skopt", makeSkopt),
-		"config":      starlark.NewBuiltin("config", makeConfig),
-		"localsystem": starlark.NewBuiltin("localsystem", makeLocalSystem),
-		"ec2system":   starlark.NewBuiltin("ec2system", makeEC2System),
-		"command":     starlark.NewBuiltin("command", makeCommand),
-	}
 	globals, err := starlark.ExecFile(thread, filename, src, builtins)
 	// Freeze everything now so that if we try to mutate global state
 	// while invoking run configs later, we fail.

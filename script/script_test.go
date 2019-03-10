@@ -6,6 +6,7 @@ package script_test
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/grailbio/bigmachine"
@@ -79,5 +80,28 @@ func TestCommand(t *testing.T) {
 	}
 	if got, want := studies[2].Name, "1.4142135623730951"; got != want {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestLoad(t *testing.T) {
+	studies, err := script.Load("testdata/load.dv", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(studies), 1; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := studies[0].Name, "test"; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestLoadCycle(t *testing.T) {
+	_, err := script.Load("testdata/cycle.dv", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "cycle in load graph involving module testdata/cycle.dv") {
+		t.Fatal(err)
 	}
 }

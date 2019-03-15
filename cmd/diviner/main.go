@@ -142,6 +142,10 @@
 //	diviner run [-rounds M] [-trials N] script.dv [studies]
 //		Run M rounds of N trials of the studies matching regexp.
 //		All studies are run if the regexp is omitted.
+//	diviner run script.dv runs...
+//		Re-run previous runs in studies defined in the script.dv.
+//		This uses parameter values from a previous run(s) and
+// 		re-runs them.
 //	diviner logs [-f] run
 //		Write the logs for the given run to standard output.
 //
@@ -172,6 +176,10 @@
 // argument. If no studies are specified, all studies are run
 // concurrently.
 //
+// diviner run script.dv runs... re-runs one or more runs from
+// studies defined in the provided script. Specifically: parameter
+// values are taken from the named runs and re-launched with the
+// current version of the study from the script.
 //
 // diviner logs [-f] run writes logs from the named run to standard
 // output. If -f is given, the log is followed and updates are written
@@ -517,18 +525,17 @@ Info displays detailed information about studies or runs.`)
 	var tw tabwriter.Writer
 	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
 	for _, arg := range flags.Args() {
-		parts := strings.SplitN(arg, ":", 2)
-		switch len(parts) {
-		case 1:
-			study, err := db.Study(ctx, parts[0])
+		study, run := splitName(arg)
+		if run == "" {
+			study, err := db.Study(ctx, study)
 			if err != nil {
 				log.Fatal(err)
 			}
 			if err := studyTemplate.Execute(&tw, study); err != nil {
 				log.Fatal(err)
 			}
-		case 2:
-			run, err := db.Run(ctx, parts[0], parts[1])
+		} else {
+			run, err := db.Run(ctx, study, run)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -544,7 +551,7 @@ Info displays detailed information about studies or runs.`)
 				}
 			}
 			err = runTemplate.Execute(&tw, map[string]interface{}{
-				"study":   parts[0],
+				"study":   study,
 				"run":     run,
 				"metrics": metrics,
 				"verbose": *verbose,
@@ -590,14 +597,18 @@ If no studies are specified, all defined studies are run concurrently.`)
 		log.Fatal(err)
 	}
 	args = flags.Args()[1:]
-	switch len(args) {
-	case 0: // all studies
-	case 1:
-		match(&studies, args[0])
-	default:
-		flags.Usage()
-		os.Exit(2)
+	// Make sure they are either all runs or all studies.
+	study := true // "all studies"
+	for i, arg := range args {
+		_, run := splitName(arg)
+		if i == 0 {
+			study = run == ""
+		} else if run == "" != study {
+			fmt.Fprintln(os.Stderr, "cannot mix studies and runs")
+			flags.Usage()
+		}
 	}
+
 	go func() {
 		err := http.ListenAndServe(*httpaddr, nil)
 		log.Error.Printf("failed to start diagnostic http server: %v", err)
@@ -613,22 +624,62 @@ If no studies are specified, all defined studies are run concurrently.`)
 	expvar.Publish("diviner", expvar.Func(func() interface{} { return runner.Counters() }))
 	http.Handle("/", runner)
 
-	names := make([]string, len(studies))
-	for i, study := range studies {
-		names[i] = study.Name
-	}
-	log.Printf("performing trials for studies: %s", strings.Join(names, ", "))
-
-	var nerr uint32
-	_ = traverser.Each(len(studies), func(i int) error {
-		if err := runStudy(ctx, runner, studies[i], *ntrials, *nrounds); err != nil {
-			atomic.AddUint32(&nerr, 1)
-			log.Error.Printf("study %v failed: %v", studies[i], err)
+	if study {
+		switch len(args) {
+		case 0: // all studies
+		case 1:
+			match(&studies, args[0])
+		default:
+			flags.Usage()
+			os.Exit(2)
 		}
-		return nil
-	})
-	if nerr > 0 {
-		os.Exit(1)
+		names := make([]string, len(studies))
+		for i, study := range studies {
+			names[i] = study.Name
+		}
+		log.Printf("performing trials for studies: %s", strings.Join(names, ", "))
+
+		var nerr uint32
+		_ = traverser.Each(len(studies), func(i int) error {
+			if err := runStudy(ctx, runner, studies[i], *ntrials, *nrounds); err != nil {
+				atomic.AddUint32(&nerr, 1)
+				log.Error.Printf("study %v failed: %v", studies[i], err)
+			}
+			return nil
+		})
+		if nerr > 0 {
+			os.Exit(1)
+		}
+	} else {
+		var (
+			runs      = make([]diviner.Run, len(args))
+			runsStudy = make([]diviner.Study, len(args))
+		)
+		for i := range runsStudy {
+			study, _ := splitName(args[i])
+			runsStudy[i] = find(studies, study)
+		}
+		err := traverser.Each(len(runs), func(i int) (err error) {
+			study, run := splitName(args[i])
+			runs[i], err = db.Run(ctx, study, run)
+			return
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		err = traverse.Each(len(runs), func(i int) (err error) {
+			log.Printf("repeating run %s", args[i])
+			runs[i], err = runner.Run(ctx, runsStudy[i], runs[i].Values())
+			return
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		for i, run := range runs {
+			if run.State() != diviner.Success {
+				log.Error.Printf("run %s failed", args[i])
+			}
+		}
 	}
 }
 
@@ -910,4 +961,19 @@ func filterAndSort(keys map[string]bool, match string) []string {
 	}
 	sort.Strings(sorted)
 	return sorted
+}
+
+func splitName(name string) (study, run string) {
+	parts := strings.SplitN(name, ":", 2)
+	switch len(parts) {
+	case 1:
+		return parts[0], ""
+	case 2:
+		if parts[1] == "" {
+			log.Fatalf("%s: empty run ID", name)
+		}
+		return parts[0], parts[1]
+	default:
+		panic(parts)
+	}
 }

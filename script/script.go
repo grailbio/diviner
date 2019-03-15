@@ -472,6 +472,8 @@ func makeEC2System(thread *starlark.Thread, _ *starlark.Builtin, args starlark.T
 		"name", &system.ID,
 		"parallelism", &system.Parallelism,
 		"ami", &ec2.AMI,
+		"region?", &ec2.Region,
+		"security_group?", &ec2.SecurityGroup,
 		"instance_profile", &ec2.InstanceProfile,
 		"instance_type", &ec2.InstanceType,
 		"disk_space?", &diskspace,

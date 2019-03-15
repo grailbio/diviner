@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/grailbio/base/errors"
@@ -70,6 +71,7 @@ func (d *dataset) Do(ctx context.Context, runner *Runner) {
 	}
 	var writer io.Writer = ioutil.Discard
 	path := fmt.Sprintf("dataset.%s.log", d.Name)
+	path = strings.Replace(path, "/", "_", -1)
 	if f, err := os.Create(path); err == nil {
 		writer = f
 		defer f.Close()

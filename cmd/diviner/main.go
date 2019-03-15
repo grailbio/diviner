@@ -484,7 +484,8 @@ var (
 	}
 
 	runTemplate = template.Must(template.New("study").Funcs(runFuncMap).Parse(`run {{.study}}:{{.run.ID}}:
-	state:	{{.run.State}}
+	state:	{{.run.State}}{{if .status}}
+	status:	{{.status}}{{end}}
 	created:	{{.run.Created.Local}}
 	runtime:	{{.run.Runtime}}
 	values:{{range $_, $value := .run.Values.Sorted }}
@@ -535,11 +536,19 @@ Info displays detailed information about studies or runs.`)
 			if err != nil {
 				log.Fatal(err)
 			}
+			var status string
+			if run.State() == diviner.Pending {
+				status, err = run.Status(ctx)
+				if err != nil {
+					log.Error.Printf("failed retrieving status for run %s: %v", run.ID(), err)
+				}
+			}
 			err = runTemplate.Execute(&tw, map[string]interface{}{
 				"study":   parts[0],
 				"run":     run,
 				"metrics": metrics,
 				"verbose": *verbose,
+				"status":  status,
 			})
 			if err != nil {
 				log.Fatal(err)

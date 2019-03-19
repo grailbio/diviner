@@ -27,6 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/base/sync/once"
+	"github.com/grailbio/base/traverse"
 	"github.com/grailbio/diviner"
 	"golang.org/x/time/rate"
 )
@@ -39,6 +40,9 @@ const (
 	// The time layout used to store timestamps in dynamodb.
 	// RFC3339 timestamps order lexically.
 	timeLayout = time.RFC3339
+
+	// ScanSegments is the number of concurrent scan operations we perform.
+	scanSegments = 50
 )
 
 var logGroups once.Map
@@ -78,8 +82,26 @@ func (d *DB) Study(ctx context.Context, name string) (study diviner.Study, err e
 
 // Studies implements diviner.Database.
 func (d *DB) Studies(ctx context.Context, prefix string) ([]diviner.Study, error) {
+	segments := make([][]diviner.Study, scanSegments)
+	err := traverse.Each(len(segments), func(i int) (err error) {
+		segments[i], err = d.studies(ctx, prefix, i, len(segments))
+		return
+	})
+	if err != nil {
+		return nil, err
+	}
+	var studies []diviner.Study
+	for _, segment := range segments {
+		studies = append(studies, segment...)
+	}
+	return studies, nil
+}
+
+func (d *DB) studies(ctx context.Context, prefix string, segment, totalSegments int) ([]diviner.Study, error) {
 	input := &dynamodb.ScanInput{
 		TableName:                aws.String(d.table),
+		Segment:                  aws.Int64(int64(segment)),
+		TotalSegments:            aws.Int64(int64(totalSegments)),
 		FilterExpression:         aws.String(`attribute_exists(#meta)`),
 		ExpressionAttributeNames: attributeNames("meta"),
 	}

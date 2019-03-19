@@ -261,7 +261,7 @@ Flags:`)
 
 var httpaddr = flag.String("http", ":6000", "http status address")
 
-var traverser = traverse.Limit(100)
+var traverser = traverse.Limit(400)
 
 func main() {
 	initS3()

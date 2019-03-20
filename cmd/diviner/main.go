@@ -351,11 +351,12 @@ func match(studies *[]diviner.Study, pat string) {
 
 func list(db diviner.Database, args []string) {
 	var (
-		flags    = flag.NewFlagSet("list", flag.ExitOnError)
-		listRuns = flags.Bool("runs", false, "list runs matching studies")
-		load     = flags.String("l", "", "load studies from the provided script file")
-		runState = flags.String("state", "pending,success,failure", "list of run states to query")
-		status   = flags.Bool("s", false, "show status for pending runs")
+		flags     = flag.NewFlagSet("list", flag.ExitOnError)
+		listRuns  = flags.Bool("runs", false, "list runs matching studies")
+		load      = flags.String("l", "", "load studies from the provided script file")
+		runState  = flags.String("state", "pending,success,failure", "list of run states to query")
+		status    = flags.Bool("s", false, "show status for pending runs")
+		sinceFlag = flags.String("since", "", "only show entries that have been updated since the provided date or duration")
 	)
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, `usage:
@@ -378,16 +379,34 @@ the given study names.`)
 	if len(args) == 0 {
 		args = []string{".*"} // list all
 	}
-	getter := databaseGetter(db)
+	var since time.Time
+	if *sinceFlag != "" {
+		if d, err := time.ParseDuration(*sinceFlag); err == nil {
+			since = time.Now().Add(-d)
+		} else if since, err = time.Parse("2006-01-02", *sinceFlag); err != nil {
+			fmt.Fprintf(os.Stderr, "-since=%s does not parse as a duration or date\n", *sinceFlag)
+			flags.Usage()
+		}
+	}
+	// This is a hack to make sure we don't overscan studies when looking at pending
+	// runs. One hour is more than enough slack for keepalive; but this really should
+	// be pushed into the database layer.
+	if since.IsZero() && *runState == "pending" && *listRuns {
+		since = time.Now().Add(-time.Hour)
+	}
+	getter := databaseGetter(db, since)
 	if *load != "" {
-		getter = func(_ context.Context, prefix string) []diviner.Study {
+		getter = func(_ context.Context, query string, isPrefix bool) []diviner.Study {
 			studies, err := script.Load(*load, nil)
 			if err != nil {
 				log.Fatal(err)
 			}
+			if !isPrefix {
+				return []diviner.Study{find(studies, query)}
+			}
 			var n int
 			for _, study := range studies {
-				if strings.HasPrefix(study.Name, prefix) {
+				if strings.HasPrefix(study.Name, query) {
 					studies[n] = study
 					n++
 				}
@@ -422,7 +441,7 @@ the given study names.`)
 	}
 	runs := make([][]diviner.Run, len(studies))
 	err := traverser.Each(len(runs), func(i int) (err error) {
-		runs[i], err = db.Runs(ctx, studies[i].Name, state)
+		runs[i], err = db.Runs(ctx, studies[i].Name, state, since)
 		return err
 	})
 	if err != nil {
@@ -735,7 +754,7 @@ specifying regular expressions for matching them via the flags
 		flags.Usage()
 	}
 	ctx := context.Background()
-	studies := studies(ctx, flags.Args(), databaseGetter(db))
+	studies := studies(ctx, flags.Args(), databaseGetter(db, time.Time{}))
 	if len(studies) == 0 {
 		log.Fatal("no studies matched")
 	}
@@ -761,7 +780,7 @@ specifying regular expressions for matching them via the flags
 	}
 	studyRuns := make([][]diviner.Run, len(studies))
 	err := traverser.Each(len(studyRuns), func(i int) (err error) {
-		studyRuns[i], err = db.Runs(ctx, studies[i].Name, diviner.Success)
+		studyRuns[i], err = db.Runs(ctx, studies[i].Name, diviner.Success, time.Time{})
 		return
 	})
 	if err != nil {
@@ -906,9 +925,16 @@ the logs is followed and updates are printed as they become available.
 	}
 }
 
-func databaseGetter(db diviner.Database) func(context.Context, string) []diviner.Study {
-	return func(ctx context.Context, prefix string) []diviner.Study {
-		studies, err := db.Studies(ctx, prefix)
+func databaseGetter(db diviner.Database, since time.Time) func(context.Context, string, bool) []diviner.Study {
+	return func(ctx context.Context, query string, isPrefix bool) []diviner.Study {
+		if !isPrefix {
+			study, err := db.Study(ctx, query)
+			if err != nil {
+				log.Fatal(err)
+			}
+			return []diviner.Study{study}
+		}
+		studies, err := db.Studies(ctx, query, since)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -916,7 +942,7 @@ func databaseGetter(db diviner.Database) func(context.Context, string) []diviner
 	}
 }
 
-func studies(ctx context.Context, args []string, get func(context.Context, string) []diviner.Study) []diviner.Study {
+func studies(ctx context.Context, args []string, get func(context.Context, string, bool) []diviner.Study) []diviner.Study {
 	var studies []diviner.Study
 	for _, arg := range args {
 		re, err := regexp.Compile(`^` + arg + `$`)
@@ -924,8 +950,8 @@ func studies(ctx context.Context, args []string, get func(context.Context, strin
 			log.Fatal(err)
 		}
 		// TODO(marius): make point query if complete
-		prefix, _ := re.LiteralPrefix()
-		matched := get(ctx, prefix)
+		prefix, complete := re.LiteralPrefix()
+		matched := get(ctx, prefix, !complete)
 		for _, study := range matched {
 			if re.MatchString(study.Name) {
 				studies = append(studies, study)

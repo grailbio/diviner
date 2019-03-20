@@ -39,6 +39,7 @@ var (
 var (
 	studiesKey = []byte("studies")
 	metaKey    = []byte("meta")
+	updatedKey = []byte("updated")
 	runsKey    = []byte("runs")
 	logsKey    = []byte("logs")
 	metricsKey = []byte("metrics")
@@ -96,7 +97,7 @@ func (d *DB) Study(ctx context.Context, name string) (study diviner.Study, err e
 }
 
 // Studies implements diviner.Database.
-func (d *DB) Studies(ctx context.Context, prefix string) (studies []diviner.Study, err error) {
+func (d *DB) Studies(ctx context.Context, prefix string, since time.Time) (studies []diviner.Study, err error) {
 	err = d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(studiesKey)
 		if b == nil {
@@ -106,6 +107,12 @@ func (d *DB) Studies(ctx context.Context, prefix string) (studies []diviner.Stud
 		for k, v := c.Seek([]byte(prefix)); k != nil && bytes.HasPrefix(k, []byte(prefix)); k, v = c.Next() {
 			if v != nil {
 				log.Error.Printf("database contains non-bucket key study key %s", k)
+				continue
+			}
+			var updated time.Time
+			if ok, err := get(b.Bucket(k), updatedKey, &updated); err != nil {
+				return err
+			} else if ok && updated.Before(since) {
 				continue
 			}
 			var study diviner.Study
@@ -129,6 +136,9 @@ func (d *DB) New(ctx context.Context, study diviner.Study, values diviner.Values
 		if b == nil {
 			var err error
 			if b, err = tx.Bucket(studiesKey).CreateBucket([]byte(study.Name)); err != nil {
+				return err
+			}
+			if err := put(b, updatedKey, time.Now()); err != nil {
 				return err
 			}
 			if err := put(b, metaKey, study); err != nil {
@@ -178,7 +188,7 @@ func (d *DB) Run(ctx context.Context, study, id string) (diviner.Run, error) {
 }
 
 // Runs implements diviner.Database.
-func (d *DB) Runs(ctx context.Context, study string, states diviner.RunState) (runs []diviner.Run, err error) {
+func (d *DB) Runs(ctx context.Context, study string, states diviner.RunState, since time.Time) (runs []diviner.Run, err error) {
 	err = d.db.View(func(tx *bolt.Tx) error {
 		b := bucket(tx, studiesKey, []byte(study))
 		if b == nil {
@@ -198,6 +208,15 @@ func (d *DB) Runs(ctx context.Context, study string, states diviner.RunState) (r
 			run.init(d.db)
 			if err := run.unmarshal(tx); err != nil {
 				return err
+			}
+			if !since.IsZero() {
+				updated, err := run.updated(tx)
+				if err != nil {
+					return err
+				}
+				if updated.Before(since) {
+					return nil
+				}
 			}
 			// If we are querying for pending runs, they must be in the liveset;
 			// otherwise they are orphaned.
@@ -263,7 +282,11 @@ func (r *run) marshal(tx *bolt.Tx) error {
 	if err != nil {
 		return err
 	}
-	return put(b, metaKey, r)
+	err = put(b, metaKey, r)
+	if err := put(bucket(tx, studiesKey, []byte(r.Study)), updatedKey, time.Now()); err != nil {
+		log.Error.Printf("run %v: update: %s", r, err)
+	}
+	return err
 }
 
 func (r *run) unmarshal(tx *bolt.Tx) error {
@@ -276,6 +299,19 @@ func (r *run) unmarshal(tx *bolt.Tx) error {
 		err = ErrNoSuchRun
 	}
 	return err
+}
+
+func (r *run) updated(tx *bolt.Tx) (time.Time, error) {
+	b, err := r.bucket(tx, nil)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var t time.Time
+	ok, err := get(b, updatedKey, &t)
+	if err == nil && !ok {
+		err = ErrNoSuchRun
+	}
+	return t, err
 }
 
 // Write implements diviner.Run.

@@ -92,16 +92,19 @@ type Run interface {
 type Database interface {
 	// Study looks up a study by name.
 	Study(ctx context.Context, name string) (Study, error)
-	// Studies returns all the studies stored in this database with the provided prefix.
+	// Studies returns all the studies stored in this database with the provided prefix,
+	// and which have been updated since the provided time.
 	// Note that the returned studies may not be instantiable.
-	Studies(ctx context.Context, prefix string) ([]Study, error)
+	Studies(ctx context.Context, prefix string, since time.Time) ([]Study, error)
 
 	// New creates a new run in pending state. The caller can then
 	// update the run's metrics and complete it once it has finished.
 	New(ctx context.Context, study Study, values Values, config RunConfig) (Run, error)
 
-	// Runs returns all runs in the study with the provided run states.
-	Runs(ctx context.Context, study string, states RunState) ([]Run, error)
+	// Runs returns all runs in the study with the provided run states,
+	// and which have been updated since the provided time.
+	Runs(ctx context.Context, study string, states RunState, since time.Time) ([]Run, error)
+
 	// Run looks up a single run by its identifier (study, run).
 	Run(ctx context.Context, study, id string) (Run, error)
 }

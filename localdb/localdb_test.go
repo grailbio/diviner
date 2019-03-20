@@ -30,7 +30,7 @@ func TestDB(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	studies, err := db.Studies(ctx, "")
+	studies, err := db.Studies(ctx, "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestDB(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 
-	runs, err := db.Runs(ctx, study.Name, diviner.Any)
+	runs, err := db.Runs(ctx, study.Name, diviner.Any, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestDB(t *testing.T) {
 		}
 	}
 
-	runs, err = db.Runs(ctx, study.Name, diviner.Any)
+	runs, err = db.Runs(ctx, study.Name, diviner.Any, time.Time{})
 	if got, want := len(runs), N; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -169,14 +169,14 @@ func TestDB(t *testing.T) {
 		t.Error("log diff")
 	}
 
-	studies, err = db.Studies(ctx, "xxx")
+	studies, err = db.Studies(ctx, "xxx", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := len(studies), 0; got != want {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	studies, err = db.Studies(ctx, "test")
+	studies, err = db.Studies(ctx, "test", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -319,7 +319,7 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 }
 
 func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (done bool, err error) {
-	complete, err := r.db.Runs(ctx, study.Name, diviner.Success)
+	complete, err := r.db.Runs(ctx, study.Name, diviner.Success, time.Time{})
 	if err != nil && err != localdb.ErrNoSuchStudy {
 		return false, err
 	}

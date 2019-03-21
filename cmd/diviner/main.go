@@ -132,7 +132,7 @@
 // Usage:
 //	diviner list [-runs] studies...
 //		List studies available studies or runs.
-//	diviner list -l script.dv studies...
+//	diviner list -l script.dv [-runs] studies...
 //		List studies available studies defined in script.dv.
 //	diviner info [-v] names...
 //		Display information for the given study or run names.
@@ -153,10 +153,11 @@
 // expressions given. If -runs is specified then the study's runs are
 // listed instead.
 //
-// diviner list -l script.dv studies... lists information for all of
+// diviner list -l script.dv [-runs] studies... lists information for all of
 // the studies defined in the provided script matching the studies
 // regular expressions. If no patterns are provided, then all studies
-// are shown.
+// are shown. If -runs is given, the matching studies' runs are listed
+// instead.
 //
 // diviner info [-v] names... displays detailed information about the
 // matching study or run names. If -v is given then even more verbose
@@ -361,7 +362,7 @@ func list(db diviner.Database, args []string) {
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, `usage:
 	diviner list [-runs] studies...
-	diviner list -l script.dv studies...
+	diviner list -l script.dv [-runs] studies...
 
 List prints a summary overview of all studies (or runs) that match
 the given study names.`)
@@ -370,9 +371,6 @@ the given study names.`)
 	}
 	if err := flags.Parse(args); err != nil {
 		log.Fatal(err)
-	}
-	if *listRuns && *load != "" {
-		flags.Usage()
 	}
 	ctx := context.Background()
 	args = flags.Args()

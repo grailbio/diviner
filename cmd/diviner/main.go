@@ -489,9 +489,11 @@ the given study names.`)
 			case dur > 24*time.Hour:
 				layout = "Mon3:04PM"
 			}
+			runtime := run.Runtime()
+			runtime -= runtime % time.Second
 			fmt.Fprintf(&tw, "%s:%s\t%s\t%s\t%s\t%s\n",
 				study.Name, run.ID(), run.Created().Local().Format(layout),
-				run.Runtime(), run.State(), statuses[run])
+				runtime, run.State(), statuses[run])
 		}
 	}
 	tw.Flush()

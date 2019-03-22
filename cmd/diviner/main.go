@@ -142,6 +142,9 @@
 //	diviner run [-rounds M] [-trials N] script.dv [studies]
 //		Run M rounds of N trials of the studies matching regexp.
 //		All studies are run if the regexp is omitted.
+//	diviner script script.dv study [-param=value...]
+//		Render a bash script implementing the study from script.dv
+//		with the provided parameters.
 //	diviner run script.dv runs...
 //		Re-run previous runs in studies defined in the script.dv.
 //		This uses parameter values from a previous run(s) and
@@ -182,6 +185,12 @@
 // values are taken from the named runs and re-launched with the
 // current version of the study from the script.
 //
+// diviner script script.dv study [-param=value...] renders a bash
+// script containing functions for each of the study's datasets as
+// well as the study itself. This is mostly intended for debugging
+// and development, but may also be used to manually recreate the
+// actions taken by a run.
+//
 // diviner logs [-f] run writes logs from the named run to standard
 // output. If -f is given, the log is followed and updates are written
 // as they appear.
@@ -196,6 +205,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -246,6 +256,9 @@ func usage() {
 	diviner run [-rounds M] [-trials N] script.dv [studies]
 		Run M rounds of N trials of the studies matching regexp.
 		All studies are run if the regexp is omitted.
+	diviner script script.dv study [-param=value...]
+		Render a bash script containing functions implementing a study,
+		including its datasets.
 	diviner logs [-f] run
 		Write the logs for the given run to standard output.
 
@@ -312,6 +325,8 @@ func main() {
 		info(database, args)
 	case "run":
 		run(database, args)
+	case "script":
+		showScript(database, args)
 	case "leaderboard":
 		leaderboard(database, args)
 	case "logs":
@@ -394,23 +409,7 @@ the given study names.`)
 	}
 	getter := databaseGetter(db, since)
 	if *load != "" {
-		getter = func(_ context.Context, query string, isPrefix bool) []diviner.Study {
-			studies, err := script.Load(*load, nil)
-			if err != nil {
-				log.Fatal(err)
-			}
-			if !isPrefix {
-				return []diviner.Study{find(studies, query)}
-			}
-			var n int
-			for _, study := range studies {
-				if strings.HasPrefix(study.Name, query) {
-					studies[n] = study
-					n++
-				}
-			}
-			return studies[:n]
-		}
+		getter = scriptGetter(*load)
 	}
 	studies := studies(ctx, args, getter)
 	if !*listRuns {
@@ -508,6 +507,7 @@ var (
 
 	runFuncMap = template.FuncMap{
 		"reindent": reindent,
+		"join":     strings.Join,
 	}
 
 	runTemplate = template.Must(template.New("study").Funcs(runFuncMap).Parse(`run {{.study}}:{{.run.ID}}:
@@ -521,6 +521,20 @@ var (
 		{{$metric.Name}}:	{{$metric.Value}}{{end}}{{if .verbose}}
 	script:
 {{reindent "		" .run.Config.Script}}{{end}}
+`))
+
+	runConfigTemplate = template.Must(template.New("run_config").Funcs(runFuncMap).Parse(`{{range $_, $dataset :=  .Datasets}}function dataset{{$dataset.Name}} {
+#	if_not_exist:	{{$dataset.IfNotExist}}
+#	local_files:	{{join $dataset.LocalFiles ", "}}
+#	system:	{{$dataset.System.ID}}
+
+{{$dataset.Script}}
+}{{end}}
+function study {
+#	local_files:	{{join .LocalFiles ", "}}
+#	system:	{{.System.ID}}
+{{.Script}}
+}
 `))
 )
 
@@ -722,6 +736,95 @@ func runStudy(ctx context.Context, runner *runner.Runner, study diviner.Study, n
 		log.Printf("%s: study complete after %d rounds", study.Name, round)
 	}
 	return nil
+}
+
+func showScript(db diviner.Database, args []string) {
+	flags := flag.NewFlagSet("show", flag.ExitOnError)
+	flags.Usage = func() {
+		fmt.Fprintln(os.Stderr, `usage: diviner script script.dv study [-param1=value1 -param2=value2 ...]
+
+Script renders a bash script to standard output containing a function
+for each of the study's datasets and the study itself. The study's
+parameter values can be specified via flags; unspecified parameter
+values are sampled randomly from valid parameter values.
+`)
+		flags.PrintDefaults()
+		os.Exit(2)
+	}
+	if err := flags.Parse(args); err != nil {
+		log.Fatal(err)
+	}
+	if flags.NArg() < 1 {
+		flags.Usage()
+	}
+	getter := scriptGetter(flags.Arg(0))
+	studyUsage := func() {
+		fmt.Fprintln(os.Stderr, "valid studies are:")
+		for _, study := range studies(context.Background(), []string{".*"}, getter) {
+			fmt.Fprintf(os.Stderr, "\t%s\n", study.Name)
+		}
+		os.Exit(2)
+	}
+	if flags.NArg() < 2 {
+		fmt.Fprintln(os.Stderr, "no study specified")
+		studyUsage()
+	}
+	args = flags.Args()[2:]
+	ctx := context.Background()
+	matched := studies(ctx, []string{flags.Arg(1)}, getter)
+	if len(matched) != 1 {
+		if len(matched) == 0 {
+			fmt.Fprintln(os.Stderr, "no studies matched")
+		} else {
+			fmt.Fprintln(os.Stderr, "multiple studies matched")
+		}
+		studyUsage()
+	}
+	var (
+		study  = matched[0]
+		values = make(diviner.Values)
+		rng    = rand.New(rand.NewSource(0))
+	)
+	flags = flag.NewFlagSet(study.Name, flag.ExitOnError)
+	// Sort these so that they get the same (random) value each time.
+	names := make([]string, 0, len(study.Params))
+	for name := range study.Params {
+		names = append(names, name)
+	}
+	for _, name := range names {
+		switch param := study.Params[name]; param.Kind() {
+		case diviner.Integer:
+			p := new(diviner.Int)
+			flags.Int64Var((*int64)(p), name, param.Sample(rng).Int(), "integer parameter")
+			values[name] = p
+		case diviner.Real:
+			p := new(diviner.Float)
+			flags.Float64Var((*float64)(p), name, param.Sample(rng).Float(), "real parameter")
+			values[name] = p
+		case diviner.Str:
+			p := new(diviner.String)
+			flags.StringVar((*string)(p), name, param.Sample(rng).Str(), "string parameter")
+			values[name] = p
+		}
+	}
+	if err := flags.Parse(args); err != nil {
+		log.Fatal(err)
+	}
+	for name, val := range values {
+		if p := study.Params[name]; !p.IsValid(val) {
+			log.Fatalf("value %s is not valid for parameter %s %s", val, name, p)
+		}
+	}
+	config, err := study.Run(values)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var tw tabwriter.Writer
+	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
+	if err := runConfigTemplate.Execute(&tw, config); err != nil {
+		log.Fatal(err)
+	}
+	tw.Flush()
 }
 
 func leaderboard(db diviner.Database, args []string) {
@@ -939,6 +1042,26 @@ func databaseGetter(db diviner.Database, since time.Time) func(context.Context, 
 			log.Fatal(err)
 		}
 		return studies
+	}
+}
+
+func scriptGetter(filename string) func(context.Context, string, bool) []diviner.Study {
+	return func(_ context.Context, query string, isPrefix bool) []diviner.Study {
+		studies, err := script.Load(filename, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if !isPrefix {
+			return []diviner.Study{find(studies, query)}
+		}
+		var n int
+		for _, study := range studies {
+			if strings.HasPrefix(study.Name, query) {
+				studies[n] = study
+				n++
+			}
+		}
+		return studies[:n]
 	}
 }
 

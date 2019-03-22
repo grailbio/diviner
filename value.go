@@ -73,7 +73,7 @@ func (Int) Kind() Kind { return Integer }
 
 // Less implements Value.
 func (v Int) Less(w Value) bool {
-	return int64(v) < int64(w.(Int))
+	return v.Int() < w.Int()
 }
 
 // Float implements Value.
@@ -96,7 +96,7 @@ func (Float) Kind() Kind { return Real }
 
 // Less implements Value.
 func (v Float) Less(w Value) bool {
-	return float64(v) < float64(w.(Float))
+	return v.Float() < w.Float()
 }
 
 // Float implements Value.
@@ -113,7 +113,7 @@ type String string
 
 // Less implements Value.
 func (v String) Less(w Value) bool {
-	return string(v) < string(w.(String))
+	return v.Str() < w.Str()
 }
 
 // String implements Value.

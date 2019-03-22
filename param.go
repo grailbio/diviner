@@ -35,6 +35,9 @@ type Param interface {
 	// random number generator.
 	Sample(r *rand.Rand) Value
 
+	// IsValid tells whether the provided value is valid for this parameter.
+	IsValid(value Value) bool
+
 	// Params implement starlark.Value so they can be represented
 	// directly in starlark configuration scripts.
 	starlark.Value
@@ -87,6 +90,20 @@ func (d *Discrete) Values() []Value {
 // Sample draws a value set of parameter values and returns it.
 func (d *Discrete) Sample(r *rand.Rand) Value {
 	return d.DiscreteValues[r.Intn(len(d.DiscreteValues))]
+}
+
+// IsValid tells whether the value v belongs to the set of
+// allowable values.
+func (d *Discrete) IsValid(v Value) bool {
+	if v.Kind() != d.Kind() {
+		return false
+	}
+	for _, w := range d.Values() {
+		if !v.Less(w) && !w.Less(v) {
+			return true
+		}
+	}
+	return false
 }
 
 // Type implements starlark.Value.
@@ -163,6 +180,21 @@ func (r *Range) Sample(rnd *rand.Rand) Value {
 		return Int(r.Start.Int() + rnd.Int63n(r.End.Int()-r.Start.Int()))
 	case Real:
 		return Float(r.Start.Float() + rnd.Float64()*(r.End.Float()-r.Start.Float()))
+	default:
+		panic(r)
+	}
+}
+
+// IsValid tells whether the value v is inside the range r.
+func (r *Range) IsValid(v Value) bool {
+	if r.Kind() != v.Kind() {
+		return false
+	}
+	switch r.Kind() {
+	case Integer:
+		return v.Int() >= r.Start.Int() && v.Int() < r.End.Int()
+	case Real:
+		return v.Float() >= r.Start.Float() && v.Float() < r.End.Float()
 	default:
 		panic(r)
 	}

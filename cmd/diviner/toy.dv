@@ -1,7 +1,3 @@
-config(
-    database="local",
-    table="/tmp/local.ddb",
-)
 
 local = localsystem("local", 2)
 

@@ -332,13 +332,14 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 		for key, value := range vals {
 			var val starlark.Value
 			switch value.(type) {
-			case diviner.Float:
+			case diviner.Float, *diviner.Float:
 				val = starlark.Float(value.Float())
-			case diviner.Int:
+			case diviner.Int, *diviner.Int:
 				val = starlark.MakeInt64(value.Int())
-			case diviner.String:
+			case diviner.String, *diviner.String:
 				val = starlark.String(value.String())
 			default:
+				panic(fmt.Sprintf("%T", value))
 				panic(value)
 			}
 			input.SetKey(starlark.String(key), val)

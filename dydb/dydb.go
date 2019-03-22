@@ -364,11 +364,8 @@ func (d *DB) nextSeq(ctx context.Context, study diviner.Study) (uint64, error) {
 }
 
 func (d *DB) querySince(ctx context.Context, since time.Time, newQuery func() *dynamodb.QueryInput) ([]map[string]*dynamodb.AttributeValue, error) {
-	var (
-		queries []*dynamodb.QueryInput
-		now     = time.Now()
-	)
-	for t := since; t.Before(now); t = t.Add(24 * time.Hour) {
+	var queries []*dynamodb.QueryInput
+	for _, t := range dates(since, time.Now()) {
 		query := newQuery()
 		query.TableName = aws.String(d.table)
 		query.IndexName = aws.String(keepaliveIndexName)

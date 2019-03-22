@@ -57,7 +57,10 @@ func TestScript(t *testing.T) {
 	expect := diviner.RunConfig{
 		Script:     "echo 0.1 0.5",
 		LocalFiles: []string{"x", "y", "z"},
-		System:     &diviner.System{ID: "local", Parallelism: 1, System: bigmachine.Local},
+		Systems: []*diviner.System{
+			{System: bigmachine.Local, ID: "local"},
+			{System: bigmachine.Local, ID: "local2"},
+		},
 	}
 	if got, want := runConfig, expect; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)

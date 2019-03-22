@@ -44,28 +44,36 @@ var (
 	allocated    = expvar.NewInt("allocated")
 )
 
+// TestSetRetryBackoff sets the interval of retries after errors. For unittests
+// only.
+func TestSetRetryBackoff(d time.Duration) {
+	machineRetry = retry.Jitter(retry.Backoff(d, d, 1), 0.5)
+}
+
 // A worker represents a single bigmachine worker in Diviner. It
 // provides functions to run commands using the command service, and
 // to return the worker to the main event loop.
 type worker struct {
 	// Machine is the bigmachine machine represented by this worker.
 	*bigmachine.Machine
+	// Session is initially nil. (*worker).Start sets this field to one of the
+	// entries in Candidates after it successfully allocates a machine.
+	Session *session
 
 	// IdleTime is the time at which the worker entered the idle list;
 	// it's maintained by the runner loop.
 	IdleTime time.Time
 
-	// Session is the runner-managed bigmachine session associated with
-	// this worker.
-	Session *session
+	// List of sessions from which a machine may be allocated.
+	Candidates []*session
 
 	returnc chan<- *worker
 	err     error
 }
 
-// Start starts the worker w new worker using the provided bigmachine
-// session. Once the worker has started (or failed to start), it is
-// returned.
+// Start starts a new worker machine. It tries sessions listed in w.Candidates
+// round-robin one of them successfully allocates an instance. On success,
+// w.Session is set to the session from which the machine was allocated.
 func (w *worker) Start(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -83,13 +91,15 @@ func (w *worker) Start(ctx context.Context) {
 			w.err = err
 			return
 		}
-		machines, err := w.Session.Start(ctx, 1, bigmachine.Services{
+		sess := w.Candidates[try%len(w.Candidates)]
+		machines, err := sess.B.Start(ctx, 1, bigmachine.Services{
 			"Cmd": &commandService{},
 		})
 		if err == nil && len(machines) == 0 {
 			err = errors.New("no machines allocated")
 		} else if err == nil {
 			w.Machine = machines[0]
+			w.Session = sess
 			select {
 			case <-ctx.Done():
 				w.err = ctx.Err()

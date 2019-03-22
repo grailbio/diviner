@@ -1,4 +1,4 @@
-local = localsystem("local", 1)
+local = localsystem("local")
 
 def dummy_study(name):
     study(name=name.strip(),

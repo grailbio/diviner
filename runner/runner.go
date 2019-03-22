@@ -203,6 +203,7 @@ func (r *Runner) Loop(ctx context.Context) error {
 		case r.replyc <- w:
 		}
 	}
+outer:
 	for {
 		updateCounters()
 		select {
@@ -215,56 +216,62 @@ func (r *Runner) Loop(ctx context.Context) error {
 					w, sess.Idle = sess.Idle[0], sess.Idle[1:]
 					log.Printf("worker %s idled out from pool", w)
 					w.Cancel()
-					sess.N--
 					nworker--
 				}
 			}
 		case req := <-r.requestc:
-			sess, ok := sessions[req.sys]
-			if !ok {
-				sess = &session{System: req.sys}
-				var err error
-				sess.B = bigmachine.Start(req.sys)
-				if err != nil {
-					return fmt.Errorf("failed to create session for system %s: %v", req.sys, err)
+			if len(req.sessions) > 0 {
+				panic(req)
+			}
+			var reqSessions []*session
+			for _, sys := range req.sys {
+				sess, ok := sessions[sys]
+				if !ok {
+					sess = &session{
+						System:   sys,
+						B:        bigmachine.Start(sys),
+						Requests: map[*request]struct{}{},
+					}
+					if sess.System.Name() != "testsystem" {
+						sess.B.HandleDebugPrefix(fmt.Sprintf("/debug/%s/", sess.System.ID), http.DefaultServeMux)
+					}
+					sessions[sys] = sess
 				}
-				if sess.Name() != "testsystem" {
-					sess.HandleDebugPrefix("/debug/"+sess.ID+"/", http.DefaultServeMux)
+				req.attach(sess)
+				if len(sess.Idle) > 0 {
+					var w *worker
+					w, sess.Idle = sess.Idle[0], sess.Idle[1:]
+					req.detach()
+					go reply(req, w)
+					continue outer
 				}
-				sessions[req.sys] = sess
+				reqSessions = append(reqSessions, sess)
 			}
-			if len(sess.Idle) > 0 {
-				var w *worker
-				w, sess.Idle = sess.Idle[0], sess.Idle[1:]
-				go reply(req, w)
-				break
+			w := &worker{
+				Candidates: reqSessions,
+				returnc:    workerc,
 			}
-			sess.Requests = append(sess.Requests, req)
-			if sess.Parallelism > 0 && sess.Parallelism <= sess.N {
-				break
-			}
-			sess.N++
 			nworker++
 			nstarted++
-			w := &worker{
-				Session: sess,
-				returnc: workerc,
-			}
 			go w.Start(ctx)
 		case w := <-workerc:
-			sess := w.Session
 			if err := w.Err(); err != nil {
 				// TODO(marius): allocate a new worker to replace this one.
-				sess.N--
 				nworker--
 				log.Error.Printf("worker %s error: %v", w, err)
 				break
 			}
+			if w.Session == nil {
+				panic(fmt.Sprintf("nil session, %v %v", w, w.Err()))
+			}
+			sess := w.Session
 			if len(sess.Requests) > 0 {
-				var req *request
-				req, sess.Requests = sess.Requests[0], sess.Requests[1:]
-				go reply(req, w)
-				break
+				for req := range sess.Requests {
+					req.detach()
+					go reply(req, w)
+					continue outer
+				}
+				panic("should not reach here")
 			}
 			// Otherwise we put it on a watch list. We don't reap the instance
 			// right away because of the race between dataset completion and
@@ -358,7 +365,7 @@ func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (d
 
 // Allocate allocates a new worker and returns it. Workers must
 // be returned after they are done by calling w.Return.
-func (r *Runner) allocate(ctx context.Context, sys *diviner.System) (*worker, error) {
+func (r *Runner) allocate(ctx context.Context, sys []*diviner.System) (*worker, error) {
 	req := newRequest(sys)
 	select {
 	case r.requestc <- req:
@@ -412,11 +419,38 @@ func (r *Runner) remove(run *run) {
 
 type request struct {
 	replyc chan *worker
-	sys    *diviner.System
+
+	// Sys is the list of systems from which a new machine may be allocated.
+	sys []*diviner.System
+
+	// Sessions is the list of sessions that this request is waiting on.
+	// len(sys)==len(sessions).  This field and session.Requests link to each
+	// other.
+	sessions []*session
 }
 
-func newRequest(sys *diviner.System) *request {
-	return &request{make(chan *worker), sys}
+func newRequest(sys []*diviner.System) *request {
+	return &request{make(chan *worker), sys, nil}
+}
+
+// Remove this request from all the sessions that it's waiting on.
+func (r *request) detach() {
+	for _, sess := range r.sessions {
+		if _, ok := sess.Requests[r]; !ok {
+			panic("request not found")
+		}
+		delete(sess.Requests, r)
+	}
+	r.sessions = nil
+}
+
+// Register this request to the session's waitlist.
+func (r *request) attach(sess *session) {
+	if _, ok := sess.Requests[r]; ok {
+		panic("duplicate request")
+	}
+	sess.Requests[r] = struct{}{}
+	r.sessions = append(r.sessions, sess)
 }
 
 func (r *request) Reply() <-chan *worker {
@@ -426,14 +460,16 @@ func (r *request) Reply() <-chan *worker {
 // Session stores the bigmachine session and associated state for a
 // single system.
 type session struct {
-	// System is the diviner system from which this session is started.
-	*diviner.System
-	// B is the bigmachine session associated with this system.
-	*bigmachine.B
-	// Idle is a free pool of idle workers, in order of idle-ness.
-	N int
-	// Requests is the pending requests for workers in this system.
-	Requests []*request
+	// System describes a list of systems from which this session is started.  If
+	// len(System)>1, they are tried in round-robin order.
+	System *diviner.System
+	// B stores the bigmachine sessions associated with this system.
+	// len(B)==len(pool.Systems).
+	B *bigmachine.B
+
+	// Requests is the pending requests for workers in this system.  This field
+	// and request.session link to each other.
+	Requests map[*request]struct{}
 	// Idle is the set of idle workers in this system.
 	Idle []*worker
 }

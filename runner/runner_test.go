@@ -7,6 +7,7 @@ package runner_test
 import (
 	"bytes"
 	"context"
+	"encoding/gob"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/grailbio/base/retry"
+	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/bigmachine/testsystem"
 	"github.com/grailbio/diviner"
 	"github.com/grailbio/diviner/localdb"
@@ -23,6 +25,21 @@ import (
 	"github.com/grailbio/diviner/runner"
 	"github.com/grailbio/testutil"
 )
+
+// failingSystem implements bigmachine.System. Start always fails.
+type errorSystem struct {
+	*testsystem.System
+}
+
+func (s *errorSystem) Start(_ context.Context, count int) ([]*bigmachine.Machine, error) {
+	fmt.Print("starterror")
+	return nil, fmt.Errorf("error system does not support start")
+}
+
+func init() {
+	gob.Register(new(errorSystem))
+	runner.TestSetRetryBackoff(1 * time.Second)
+}
 
 func TestRunner(t *testing.T) {
 	dir, cleanup := runnerTest(t)
@@ -33,15 +50,15 @@ func TestRunner(t *testing.T) {
 		t.Fatal(err)
 	}
 	test := testsystem.New()
-	system := &diviner.System{
-		ID:          "test",
-		Parallelism: 2,
-		System:      test,
+	systems := []*diviner.System{
+		&diviner.System{ID: "error", System: &errorSystem{testsystem.New()}},
+		&diviner.System{ID: "test", System: test},
 	}
+
 	datasetFile := filepath.Join(dir, "dataset")
 	dataset := diviner.Dataset{
-		Name:   "testset",
-		System: system,
+		Name:    "testset",
+		Systems: systems,
 		Script: fmt.Sprintf(`
 			# Should run only once.
 			test -f %s && exit 1
@@ -56,7 +73,7 @@ func TestRunner(t *testing.T) {
 		},
 		Run: func(values diviner.Values) (diviner.RunConfig, error) {
 			return diviner.RunConfig{
-				System:   system,
+				Systems:  systems,
 				Datasets: []diviner.Dataset{dataset},
 				Script: fmt.Sprintf(`
 						# Dataset should have been produced.
@@ -110,10 +127,6 @@ func TestRunner(t *testing.T) {
 	if got, want := trials, expect; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	if got, want := test.N(), 2; got != want {
-		t.Errorf("got %v, want %v", got, want)
-	}
-
 	cancel()
 	// Make sure the machines are stopped.
 	for _, m := range test.B().Machines() {
@@ -129,14 +142,11 @@ func TestRunnerError(t *testing.T) {
 
 	db, err := localdb.Open(filepath.Join(dir, "test.ddb"))
 	test := testsystem.New()
-	system := &diviner.System{
-		ID:     "test",
-		System: test,
-	}
+	systems := []*diviner.System{&diviner.System{ID: "test", System: test}}
 	dataset := diviner.Dataset{
-		System: system,
-		Name:   "testset",
-		Script: "exit 1",
+		Systems: systems,
+		Name:    "testset",
+		Script:  "exit 1",
 	}
 	study := diviner.Study{
 		Name: "test",
@@ -145,8 +155,8 @@ func TestRunnerError(t *testing.T) {
 		},
 		Run: func(values diviner.Values) (diviner.RunConfig, error) {
 			config := diviner.RunConfig{
-				System: system,
-				Script: "echo the_status; exit 1",
+				Systems: systems,
+				Script:  "echo the_status; exit 1",
 			}
 			if values["param"].Int() == 0 {
 				// In this case, the run should fail before attempting

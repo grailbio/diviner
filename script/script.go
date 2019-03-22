@@ -28,13 +28,13 @@
 //	maximize(metric)
 //		Defines an objective that maximizes a metric (string).
 //
-//	localsystem(name, parallelism)
-//		Defines a new local system with the provided name and parallelism.
-//		The provided name is used to identify the system in tools.
+//	localsystem(name)
+//		Defines a new local system with the provided name.
+//		The name is used to identify the system in tools.
 //
-//	ec2system(name, parallelism, ami, instance_profile, instance_type, disk_space?, data_space?, on_demand?, flavor?)
-//		Defines a new EC2-based system of the given name, parallelism, and
-//		configuration. The provided name is used to identify the system in tools.
+//	ec2system(name, ami, instance_profile, instance_type, disk_space?, data_space?, on_demand?, flavor?)
+//		Defines a new EC2-based system of the given name, and configuration.
+//    The provided name is used to identify the system in tools.
 //		- ami:              the EC2 AMI to use when launching new instances;
 //		- instance_profile: the IAM instance profile assigned to new instances;
 //		- instance_type:    the instance type used;
@@ -48,7 +48,9 @@
 //	dataset(name, system, if_not_exist?, local_files?, script)
 //		Defines a dataset (diviner.Dataset):
 //		- name:         the name of the dataset, which must be unique;
-//		- system:       the system to be used for dataset execution;
+//		- system:       the system(s) to be used for run execution. The value is either
+//                    a single system or a list of systems. In the latter case,
+//                    the run will use any one of systems can allocate resources.
 //		- if_not_exist: a URL that is checked for conditional execution;
 //		- local_files:  a list of local files that must be made available
 // 		                in the script's execution environment;
@@ -58,7 +60,9 @@
 //		Defines a run config (diviner.RunConfig) representing a single
 //		trial:
 //		- script:      the script that is executed for this trial;
-//		- system:      the system to be used for run execution;
+//		- system:      the system(s) to be used for run execution. The value is either
+//                   a single system or a list of systems. In the latter case,
+//                   the run will use any one of systems can allocate resources.
 //		- local_files: a list of local files that must be made available
 //		               in the script's execution environment;
 //		- datasets:    a list of datasets that must be available before
@@ -362,15 +366,35 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 	return study, err
 }
 
+func extractSystems(val starlark.Value) (systems []*diviner.System, err error) {
+	switch s := val.(type) {
+	case *diviner.System:
+		return []*diviner.System{s}, nil
+	case *starlark.List:
+		n := s.Len()
+		for i := 0; i < n; i++ {
+			system, ok := s.Index(i).(*diviner.System)
+			if !ok {
+				return nil, fmt.Errorf("Element #%d of 'systems' arg must be a system, but found %v", i, s.Index(i))
+			}
+			systems = append(systems, system)
+		}
+		return systems, nil
+	default:
+		return nil, fmt.Errorf("'systems' arg must be a list or an instance of a system, but found %v", val)
+	}
+}
+
 func makeRunConfig(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var (
 		config   diviner.RunConfig
 		files    = new(starlark.List)
 		datasets = new(starlark.List)
+		systems  = new(starlark.Value)
 	)
 	err := starlark.UnpackArgs(
 		"run_config", args, kwargs,
-		"system", &config.System,
+		"system", systems,
 		"script", &config.Script,
 		"local_files?", &files,
 		"datasets?", &datasets,
@@ -396,6 +420,9 @@ func makeRunConfig(thread *starlark.Thread, _ *starlark.Builtin, args starlark.T
 			return nil, fmt.Errorf("dataset %s is not a dataset", datasets.Index(i))
 		}
 	}
+	if config.Systems, err = extractSystems(*systems); err != nil {
+		return nil, err
+	}
 	return config, nil
 }
 
@@ -403,11 +430,12 @@ func makeDataset(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	var (
 		dataset diviner.Dataset
 		files   = new(starlark.List)
+		systems = new(starlark.Value)
 	)
 	err := starlark.UnpackArgs(
 		"dataset", args, kwargs,
 		"name", &dataset.Name,
-		"system", &dataset.System,
+		"system", systems,
 		"if_not_exist?", &dataset.IfNotExist,
 		"local_files?", &files,
 		"script", &dataset.Script,
@@ -422,6 +450,9 @@ func makeDataset(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 			return nil, fmt.Errorf("file %s is not a string", files.Index(i))
 		}
 		dataset.LocalFiles[i] = string(str)
+	}
+	if dataset.Systems, err = extractSystems(*systems); err != nil {
+		return nil, err
 	}
 	return dataset, nil
 }
@@ -455,7 +486,6 @@ func makeLocalSystem(thread *starlark.Thread, _ *starlark.Builtin, args starlark
 	err := starlark.UnpackArgs(
 		"localsystem", args, kwargs,
 		"name", &system.ID,
-		"parallelism", &system.Parallelism,
 	)
 	return system, err
 }
@@ -471,7 +501,6 @@ func makeEC2System(thread *starlark.Thread, _ *starlark.Builtin, args starlark.T
 	err := starlark.UnpackArgs(
 		"ec2system", args, kwargs,
 		"name", &system.ID,
-		"parallelism", &system.Parallelism,
 		"ami", &ec2.AMI,
 		"region?", &ec2.Region,
 		"security_group?", &ec2.SecurityGroup,

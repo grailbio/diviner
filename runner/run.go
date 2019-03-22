@@ -109,7 +109,7 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 		}
 	}
 	r.setStatus(statusWaiting, "waiting for worker")
-	w, err := runner.allocate(ctx, r.Config.System)
+	w, err := runner.allocate(ctx, r.Config.Systems)
 	if err != nil {
 		r.error(err)
 		return

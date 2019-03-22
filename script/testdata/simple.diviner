@@ -4,11 +4,12 @@ config(
     table="test",
 )
 
-local = localsystem("local", 1)
+local = localsystem("local")
+local2 = localsystem("local2")
 
 def run_simple_model(values):
     return run_config(
-        system=local,
+        system=[local, local2],
         script="echo %s %s" % (values["learning_rate"], values["dropout"]),
         local_files=["x", "y", "z"],
     )
@@ -24,4 +25,3 @@ for (name, objective) in [("study_1", minimize("x")), ("study_2", maximize("z"))
         run=run_simple_model,
         oracle=skopt(acq_func="EI"),
     )
-

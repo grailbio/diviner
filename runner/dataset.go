@@ -55,9 +55,9 @@ func (d *dataset) Do(ctx context.Context, runner *Runner) {
 		}
 	}
 	log.Printf("dataset %s: %s not found, start data generation", d.Name, d.IfNotExist)
-	w, err := runner.allocate(ctx, d.System)
+	w, err := runner.allocate(ctx, d.Systems)
 	if err != nil {
-		d.error(errors.E("dataset: allocate", d.System, err))
+		d.error(errors.E("dataset: allocate", d.Systems, err))
 		return
 	}
 	defer w.Return()

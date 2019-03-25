@@ -9,6 +9,7 @@ package oracle
 import (
 	"encoding/gob"
 	"fmt"
+	"log"
 	"sort"
 
 	"github.com/grailbio/diviner"
@@ -71,6 +72,7 @@ func (_ *GridSearch) Next(previous []diviner.Trial,
 	}
 
 	done := make([]bool, total)
+outer:
 	for _, trial := range previous {
 		var (
 			m   = 1
@@ -79,7 +81,8 @@ func (_ *GridSearch) Next(previous []diviner.Trial,
 		for _, key := range keys {
 			digit, ok := digits[key][trial.Values[key]]
 			if !ok {
-				panic(key)
+				log.Printf("skipping trial %s because it is missing a value for parameter %s", trial, key)
+				continue outer
 			}
 			num += m * digit
 			m *= len(pvalues[key])

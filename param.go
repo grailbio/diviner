@@ -138,8 +138,22 @@ func (r *Range) String() string {
 // Kind returns Real.
 func (r *Range) Kind() Kind { return r.Start.Kind() }
 
-// Values returns nil: Ranges represent infinite sets of values.
-func (r *Range) Values() []Value { return nil }
+// Values returns nil for real ranges (they are infinite), and
+// the set of values in an integer range.
+func (r *Range) Values() []Value {
+	if r.Kind() != Integer {
+		return nil
+	}
+	var (
+		start, end = r.Start.Int(), r.End.Int()
+		n          = end - start
+		vs         = make([]Value, n)
+	)
+	for i := range vs {
+		vs[i] = Int(start + int64(i))
+	}
+	return vs
+}
 
 // Sample draws a random sample from within the range represented by
 // this parameter.

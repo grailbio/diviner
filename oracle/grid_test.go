@@ -74,3 +74,27 @@ func TestGridSearch(t *testing.T) {
 		}
 	}
 }
+
+func TestGridSearchRange(t *testing.T) {
+	params := diviner.Params{
+		"x": diviner.NewRange(diviner.Int(0), diviner.Int(100)),
+	}
+	var search oracle.GridSearch
+	values, err := search.Next(nil, params, diviner.Objective{}, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(values), 100; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	diviner.SortValues(values)
+	for i, v := range values {
+		if got, want := len(v), 1; got != want {
+			t.Errorf("got %v, want %v", got, want)
+			continue
+		}
+		if got, want := v["x"].Int(), int64(i); got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	}
+}

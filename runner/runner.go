@@ -460,11 +460,9 @@ func (r *request) Reply() <-chan *worker {
 // Session stores the bigmachine session and associated state for a
 // single system.
 type session struct {
-	// System describes a list of systems from which this session is started.  If
-	// len(System)>1, they are tried in round-robin order.
+	// System describes the system from which this session is started.
 	System *diviner.System
 	// B stores the bigmachine sessions associated with this system.
-	// len(B)==len(pool.Systems).
 	B *bigmachine.B
 
 	// Requests is the pending requests for workers in this system.  This field

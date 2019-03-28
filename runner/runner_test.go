@@ -102,17 +102,13 @@ func TestRunner(t *testing.T) {
 	if !done {
 		t.Fatal("not done")
 	}
-	runs, err := db.Runs(ctx, study.Name, diviner.Success, time.Time{})
+	runs, err := db.ListRuns(ctx, study.Name, diviner.Success, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	trials := make([]diviner.Trial, len(runs))
 	for i, run := range runs {
-		trials[i].Values = run.Values()
-		trials[i].Metrics, err = run.Metrics(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
+		trials[i] = run.Trial()
 	}
 	sort.Slice(trials, func(i, j int) bool {
 		return trials[i].Values["param"].Int() < trials[j].Values["param"].Int()
@@ -184,14 +180,14 @@ func TestRunnerError(t *testing.T) {
 	if done {
 		t.Error("should not be done")
 	}
-	runs, err := db.Runs(ctx, study.Name, diviner.Success, time.Time{})
+	runs, err := db.ListRuns(ctx, study.Name, diviner.Success, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := len(runs), 0; got != want {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	runs, err = db.Runs(ctx, study.Name, diviner.Failure, time.Time{})
+	runs, err = db.ListRuns(ctx, study.Name, diviner.Failure, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,11 +195,11 @@ func TestRunnerError(t *testing.T) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 	for _, run := range runs {
-		if run.Values()["param"].Int() == 0 {
+		if run.Values["param"].Int() == 0 {
 			continue
 		}
 		var b bytes.Buffer
-		if _, err := io.Copy(&b, run.Log(false)); err != nil {
+		if _, err := io.Copy(&b, db.Log(run.Study, run.Seq, false)); err != nil {
 			t.Error(err)
 			continue
 		}

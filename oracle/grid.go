@@ -81,7 +81,7 @@ outer:
 		for _, key := range keys {
 			digit, ok := digits[key][trial.Values[key]]
 			if !ok {
-				log.Printf("skipping trial %s because it is missing a value for parameter %s", trial, key)
+				log.Printf("skipping trial %v because it is missing a value for parameter %s", trial, key)
 				continue outer
 			}
 			num += m * digit

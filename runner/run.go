@@ -63,7 +63,7 @@ func (s status) String() string {
 // the run on a worker machine. Instances of run are used by the runner to
 // coordinate runs of individual trials.
 type run struct {
-	diviner.Run
+	Run diviner.Run
 
 	// Params is the set of values for the trial represented by this run.
 	Values diviner.Values
@@ -128,13 +128,20 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 	r.mu.Lock()
 	r.start = time.Now()
 	r.mu.Unlock()
-	env := []string{fmt.Sprintf("DIVINER_RUN_ID=%s:%s", r.Study.Name, r.ID())}
+	env := []string{fmt.Sprintf("DIVINER_RUN_ID=%s:%d", r.Run.Study, r.Run.Seq)}
 	out, err := w.Run(ctx, r.Config.Script, env)
 	if err != nil {
 		r.errorf("failed to start script: %s", err)
 		return
 	}
 	r.setStatus(statusRunning, "")
+
+	logger := runner.db.Logger(r.Run.Study, r.Run.Seq)
+	defer func() {
+		if err := logger.Close(); err != nil {
+			log.Error.Printf("%s:%d: error closing logger: %v", r.Run.Study, r.Run.Seq, err)
+		}
+	}()
 
 	scan := bufio.NewScanner(out)
 	// ScanProgress tells us how to scan "progress bar" output from
@@ -153,7 +160,7 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 				log.Error.Printf("error parsing metrics from run %s: %v", r, err)
 			} else {
 				r.report(metrics)
-				if err := r.Run.Update(ctx, metrics); err != nil {
+				if err := runner.db.AppendRunMetrics(ctx, r.Run.Study, r.Run.Seq, metrics); err != nil {
 					log.Error.Printf("failed to report metrics to DB: %v", err)
 				}
 			}
@@ -168,10 +175,10 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 
 			r.setStatus(statusRunning, string(line))
 			if !progress {
-				if _, err := r.Run.Write(line); err != nil {
+				if _, err := logger.Write(line); err != nil {
 					log.Error.Printf("%s: write: %v", r, err)
 				}
-				if _, err := r.Run.Write([]byte{'\n'}); err != nil {
+				if _, err := logger.Write([]byte{'\n'}); err != nil {
 					log.Error.Printf("%s: write %v", r, err)
 				}
 			}
@@ -182,10 +189,6 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 			break
 		}
 	}
-	if err := r.Run.Flush(); err != nil {
-		log.Error.Printf("%s: flush: %v", r, err)
-	}
-
 	elapsed := time.Since(r.start)
 	if err := scan.Err(); err == nil {
 		r.setStatus(statusOk, elapsed.String())
@@ -196,7 +199,7 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 
 // String returns a textual description of this run.
 func (r *run) String() string {
-	return r.ID()
+	return fmt.Sprintf("%s:%d", r.Run.Study, r.Run.Seq)
 }
 
 // Report merges the provided metrics into the current run metrics.
@@ -222,9 +225,6 @@ func (r *run) Metrics() diviner.Metrics {
 
 // SetStatus sets the status for the run.
 func (r *run) setStatus(status status, message string) {
-	if err := r.SetStatus(context.Background(), fmt.Sprintf("%s: %s", status, message)); err != nil {
-		log.Error.Printf("run %s: error setting status: %v", r, message)
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.status = status

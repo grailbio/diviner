@@ -42,69 +42,96 @@ func (s RunState) String() string {
 	}
 }
 
-// A Run is a single run, which may either be ongoing (state pending) or
-// complete (in which case a Trial may be derived from it).
-type Run interface {
-	// Writing to a run is taken as an informational log message.
-	// Logs are stored persistently and may be retrieved later.
-	// It is invalid to write to a completed run.
-	io.Writer
-	// Flush ensures that all writes to this run has been persisted.
-	Flush() error
-	// ID returns a unique identifier for this run, which may be used
-	// to look the run up in a database later.
-	ID() string
-	// State reports the current run state.
-	State() RunState
-	// Update updates the current metrics for the run. The
-	// last metric before the run has completed is taken as the
-	// run's final output.
-	Update(ctx context.Context, metrics Metrics) error
-	// SetStatus sets the run's current status, used for informational
-	// and diagnostic purposes.
-	SetStatus(ctx context.Context, message string) error
-	// Status
-	Status(ctx context.Context) (string, error)
-	// Created returns the time the run was created by the user.
-	Created() time.Time
-	// Runtime returns the run's runtime. Only valid when status != Pending.
-	Runtime() time.Duration
-	// Config returns the run's configuration.
-	Config() RunConfig
-	// Values returns the values that are computed by this run.
-	Values() Values
-	// Metrics returns the most recent metrics for this run. If the
-	// run's state is Success, then these metrics are the final trial
-	// metrics. Empty metrics are returned if no metrics have been
-	// reported.
-	Metrics(ctx context.Context) (Metrics, error)
-	// Complete is called when the run has completed and no more
-	// metrics or logs will be reported. The run is marked as the given state
-	// (which cannot be Pending).
-	Complete(ctx context.Context, state RunState, runtime time.Duration) error
-	// Log returns a reader from which the run's log messages may
-	// be read from persistent storage. If follow is true, the returned
-	// reader streams ongoing log updates indefinitely.
-	Log(follow bool) io.Reader
+// A Run describes a single run, which, upon successful completion,
+// represents a Trial. Runs are managed by a Database.
+type Run struct {
+	// Values is the set of parameter values represented by this run.
+	Values
+
+	// Study is the name of the study serviced by this run.
+	Study string
+	// Seq is a sequence number assigned to each run in a study.
+	// Together, the study and sequence number uniquely names
+	// a run.
+	Seq uint64
+
+	// State is the current state of the run. See RunState for
+	// descriptions of these.
+	State RunState
+	// Status is a human-consumable status indicating the status
+	// of the run.
+	Status string
+
+	// Config is the RunConfig for this run.
+	Config RunConfig
+
+	// Created is the time at which the run was created.
+	Created time.Time
+	// Updated is the last time the run's state was updated. Updated is
+	// used as a keepalive mechanism.
+	Updated time.Time
+	// Runtime is the runtime duration of the run.
+	Runtime time.Duration
+
+	// Metrics is the history of metrics, in the order reported by the
+	// run.
+	//
+	// TODO(marius): include timestamps for these, or some other
+	// reference (e.g., runtime).
+	Metrics []Metrics
 }
 
-// A Database is used to track studies and their results.
+// Trial returns the Trial represented by this run.
+//
+// TODO(marius): allow other metric selection policies
+// (e.g., minimize train and test loss difference)
+func (r Run) Trial() Trial {
+	trial := Trial{Values: r.Values}
+	if len(r.Metrics) > 0 {
+		trial.Metrics = r.Metrics[len(r.Metrics)-1]
+	}
+	return trial
+}
+
+// A Database is used to track and manage studies and runs.
 type Database interface {
-	// Study looks up a study by name.
-	Study(ctx context.Context, name string) (Study, error)
-	// Studies returns all the studies stored in this database with the provided prefix,
-	// and which have been updated since the provided time.
-	// Note that the returned studies may not be instantiable.
-	Studies(ctx context.Context, prefix string, since time.Time) ([]Study, error)
+	// CreateStudyIfNotExist creates a new study from the provided Study value.
+	// If the study already exists, this is a no-op.
+	CreateStudyIfNotExist(ctx context.Context, study Study) (created bool, err error)
+	// LookupStudy returns the study with the provided name.
+	LookupStudy(ctx context.Context, name string) (Study, error)
+	// ListStudies returns the set of studies matching the provided prefix and whose
+	// last update time is not before the provided time.
+	ListStudies(ctx context.Context, prefix string, since time.Time) ([]Study, error)
 
-	// New creates a new run in pending state. The caller can then
-	// update the run's metrics and complete it once it has finished.
-	New(ctx context.Context, study Study, values Values, config RunConfig) (Run, error)
+	// InsertRun inserts the provided run into a study. The run's study,
+	// values, and config must be populated; other fields are ignored.
+	// The run's study must already exist, and the returned Run is
+	// assigned a sequence number, state, and creation time.
+	InsertRun(ctx context.Context, run Run) (Run, error)
+	// UpdateRun updates the run named by the provided study and
+	// sequence number with the given run state, message, and runtime.
+	// UpdateRun is used also as a keepalive mechanism: runners must
+	// call UpdateRun frequently in order to have the run considered
+	// live by Diviner's tooling.
+	UpdateRun(ctx context.Context, study string, seq uint64, state RunState, message string, runtime time.Duration) error
+	// AppendRunMetrics reports a new set of metrics to the run named by the provided
+	// study and sequence number.
+	AppendRunMetrics(ctx context.Context, study string, seq uint64, metrics Metrics) error
 
-	// Runs returns all runs in the study with the provided run states,
-	// and which have been updated since the provided time.
-	Runs(ctx context.Context, study string, states RunState, since time.Time) ([]Run, error)
+	// ListRuns returns the set of runs in the provided study matching the queried
+	// run states. ListRuns only returns runs that have been updated since the provided
+	// time.
+	ListRuns(ctx context.Context, study string, states RunState, since time.Time) ([]Run, error)
+	// LookupRun returns the run named by the provided study and sequence number.
+	LookupRun(ctx context.Context, study string, seq uint64) (Run, error)
 
-	// Run looks up a single run by its identifier (study, run).
-	Run(ctx context.Context, study, id string) (Run, error)
+	// Log obtains a reader for the logs emitted by the run named by the
+	// study and sequence number. If follow is true, the returned reader
+	// is a perpetual stream, updated as new log entries are appended.
+	Log(study string, seq uint64, follow bool) io.Reader
+
+	// Logger returns an io.WriteCloser, to which log messages can be written,
+	// for the run named by a study and sequence number.
+	Logger(study string, seq uint64) io.WriteCloser
 }

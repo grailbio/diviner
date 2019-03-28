@@ -5,10 +5,7 @@
 package localdb_test
 
 import (
-	"bytes"
 	"context"
-	"io"
-	"math/rand"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -30,7 +27,7 @@ func TestDB(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	studies, err := db.Studies(ctx, "", time.Time{})
+	studies, err := db.ListStudies(ctx, "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,89 +45,94 @@ func TestDB(t *testing.T) {
 		Objective: diviner.Objective{diviner.Maximize, "acc"},
 	}
 
-	values := diviner.Values{"index": diviner.Int(0), "learning_rate": diviner.Float(0.5), "dropout": diviner.Float(0.05)}
-	run, err := db.New(ctx, study, values, diviner.RunConfig{})
+	created, err := db.CreateStudyIfNotExist(ctx, study)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("expected created")
+	}
+	created, err = db.CreateStudyIfNotExist(ctx, study)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("expected not created")
 	}
 
-	run2, err := db.Run(ctx, "test1", run.ID())
+	studies, err = db.ListStudies(ctx, "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := run2, run; !runEqual(got, want) {
+	if got, want := len(studies), 1; got != want {
+		t.Fatal(err)
+	}
+	if got, want := studies[0], study; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 
-	metrics, err := run2.Metrics(ctx)
+	run := diviner.Run{
+		Study:  "test1",
+		Values: diviner.Values{"index": diviner.Int(0), "learning_rate": diviner.Float(0.5), "dropout": diviner.Float(0.05)},
+	}
+	inserted, err := db.InsertRun(ctx, run)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(metrics) != 0 {
-		t.Fatal("reported metrics")
+	if inserted.Updated.IsZero() {
+		t.Error("zero update time")
 	}
-	if got, want := run2.State(), diviner.Pending; got != want {
+
+	run, err = db.LookupRun(ctx, "test1", inserted.Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := run.Values, inserted.Values; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	for _, acc := range []float64{0.5, 0.67, 0} {
-		if err := run2.Update(ctx, diviner.Metrics{"acc": acc}); err != nil {
+	if got, want := run.Study, inserted.Study; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := run.Seq, inserted.Seq; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := run.Metrics, inserted.Metrics; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	accMetrics := []float64{0.5, 0.67, 0}
+	for _, acc := range accMetrics {
+		if err := db.AppendRunMetrics(ctx, run.Study, run.Seq, diviner.Metrics{"acc": acc}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	metrics, err = run2.Metrics(ctx)
+	// If we look them up, they should all be there now.
+	run, err = db.LookupRun(ctx, run.Study, run.Seq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := metrics, (diviner.Metrics{"acc": 0}); !reflect.DeepEqual(got, want) {
-		t.Errorf("got %v, want %v", got, want)
+	if got, want := len(run.Metrics), len(accMetrics); got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i, val := range accMetrics {
+		if got, want := run.Metrics[i]["acc"], val; got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
 	}
 
-	runs, err := db.Runs(ctx, study.Name, diviner.Any, time.Time{})
+	runs, err := db.ListRuns(ctx, study.Name, diviner.Any, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := len(runs), 1; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
-	if got, want := runs[0], run2; !runEqual(got, want) {
+	if got, want := runs[0], run; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
+}
 
-	for i := 1; i < N; i++ {
-		var (
-			values = diviner.Values{"index": diviner.Int(i), "learning_rate": diviner.Float(0.5), "dropout": diviner.Float(0.05)}
-			config = diviner.RunConfig{}
-		)
-		run, err := db.New(ctx, study, values, config)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := run.Update(ctx, diviner.Metrics{"acc": float64(i)}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	runs, err = db.Runs(ctx, study.Name, diviner.Any, time.Time{})
-	if got, want := len(runs), N; got != want {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	for _, run := range runs {
-		if err := run.Complete(ctx, diviner.Success, time.Second); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for i, run := range runs {
-		metrics, err := run.Metrics(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if run.State() != diviner.Success {
-			t.Error("wanted complete")
-		}
-		if got, want := metrics["acc"], float64(i); got != want {
-			t.Errorf("got %v, want %v", got, want)
-		}
-	}
+/*
 
 	const Size = 1 << 20
 	var (
@@ -184,10 +186,4 @@ func TestDB(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
-
-func runEqual(r, u diviner.Run) bool {
-	type eq interface {
-		Equal(r diviner.Run) bool
-	}
-	return r.(eq).Equal(u)
-}
+*/

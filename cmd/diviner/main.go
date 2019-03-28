@@ -136,6 +136,8 @@
 //		List studies available studies defined in script.dv.
 //	diviner info [-v] names...
 //		Display information for the given study or run names.
+//	diviner metrics id
+//		Writes all metrics reported by the named run in TSV format.
 //	diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...
 //		Display a leaderboard of all trails in the provided studies. The leaderboard
 //		uses the studies' shared objective unless overridden.
@@ -165,6 +167,11 @@
 // diviner info [-v] names... displays detailed information about the
 // matching study or run names. If -v is given then even more verbose
 // output is given.
+//
+// diviner metrics id writes all metrics reported by the provided run
+// to standard output in TSV format. Every unique metric name
+// reported over time is a single column; missing values are denoted
+// by "NA".
 //
 // diviner leaderboard [-objective objective] [-n N] [-values values]
 // [-metrics metrics] studies... displays a leaderboard of all trials
@@ -201,6 +208,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"expvar"
 	"flag"
 	"fmt"
@@ -211,8 +219,8 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"text/tabwriter"
 	"text/template"
@@ -231,7 +239,6 @@ import (
 	"github.com/grailbio/diviner/oracle"
 	"github.com/grailbio/diviner/runner"
 	"github.com/grailbio/diviner/script"
-	"golang.org/x/sync/errgroup"
 )
 
 func initS3() {
@@ -250,6 +257,8 @@ func usage() {
 		List studies available studies defined in script.dv.
 	diviner info [-v] names...
 		Display information for the given study or run names.
+	diviner metrics id
+		Writes all metrics reported by the named run in TSV format.
 	diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...
 		Display a leaderboard of all trails in the provided studies. The leaderboard
 		uses the studies' shared objective unless overridden.
@@ -323,6 +332,8 @@ func main() {
 		list(database, args)
 	case "info":
 		info(database, args)
+	case "metrics":
+		metrics(database, args)
 	case "run":
 		run(database, args)
 	case "script":
@@ -438,61 +449,30 @@ the given study names.`)
 	}
 	runs := make([][]diviner.Run, len(studies))
 	err := traverser.Each(len(runs), func(i int) (err error) {
-		runs[i], err = db.Runs(ctx, studies[i].Name, state, since)
+		runs[i], err = db.ListRuns(ctx, studies[i].Name, state, since)
 		return err
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	var statuses map[diviner.Run]string
-	if *status {
-		// TODO(marius): This way of querying for runs and statuses is a
-		// bit of a messy hodgepodge. We should provide a single way of
-		// querying studies and runs, and have a clear separation between
-		// update methods and query methods. This will allow us to push
-		// queries down where they can be efficiently executed.
-		statuses = make(map[diviner.Run]string)
-		var (
-			mu   sync.Mutex
-			g, _ = errgroup.WithContext(ctx)
-		)
-		for i := range runs {
-			for _, run := range runs[i] {
-				if run.State() == diviner.Pending {
-					run := run
-					g.Go(func() error {
-						status, err := run.Status(ctx)
-						if err != nil {
-							log.Error.Printf("%s: failed to retrieve status: %v", run, err)
-							return nil
-						}
-						mu.Lock()
-						defer mu.Unlock()
-						statuses[run] = status
-						return nil
-					})
-				}
-			}
-		}
-		if err := g.Wait(); err != nil {
-			log.Fatal(err)
-		}
-	}
 	now := time.Now()
 	for i, study := range studies {
 		for _, run := range runs[i] {
 			var layout = time.Kitchen
-			switch dur := now.Sub(run.Created()); {
+			switch dur := now.Sub(run.Created); {
 			case dur > 7*24*time.Hour:
 				layout = "2Jan06"
 			case dur > 24*time.Hour:
 				layout = "Mon3:04PM"
 			}
-			runtime := run.Runtime()
+			runtime := run.Runtime
 			runtime -= runtime % time.Second
-			fmt.Fprintf(&tw, "%s:%s\t%s\t%s\t%s\t%s\n",
-				study.Name, run.ID(), run.Created().Local().Format(layout),
-				runtime, run.State(), statuses[run])
+			if !*status {
+				run.Status = ""
+			}
+			fmt.Fprintf(&tw, "%s:%d\t%s\t%s\t%s\t%s\n",
+				study.Name, run.Seq, run.Created.Local().Format(layout),
+				runtime, run.State, run.Status)
 		}
 	}
 	tw.Flush()
@@ -510,15 +490,17 @@ var (
 		"join":     strings.Join,
 	}
 
-	runTemplate = template.Must(template.New("study").Funcs(runFuncMap).Parse(`run {{.study}}:{{.run.ID}}:
+	runTemplate = template.Must(template.New("study").Funcs(runFuncMap).Parse(`run {{.study}}:{{.run.Seq}}:
 	state:	{{.run.State}}{{if .status}}
-	status:	{{.status}}{{end}}
+	status:	{{.run.Status}}{{end}}
 	created:	{{.run.Created.Local}}
 	runtime:	{{.run.Runtime}}
 	values:{{range $_, $value := .run.Values.Sorted }}
-		{{$value.Name}}:	{{$value.Value}}{{end}}
-	metrics:{{range $_, $metric := .metrics.Sorted }}
-		{{$metric.Name}}:	{{$metric.Value}}{{end}}{{if .verbose}}
+		{{$value.Name}}:	{{$value.Value}}{{end}}{{if .verbose}}{{range $index, $metrics := .run.Metrics}}
+	metrics[{{$index}}]:{{range $_, $metric := $metrics.Sorted}}
+		{{$metric.Name}}:	{{$metric.Value}}{{end}}{{end}}{{else}}
+	metrics:{{range $_, $metric := .run.Trial.Metrics.Sorted }}
+		{{$metric.Name}}:	{{$metric.Value}}{{end}}{{end}}{{if .verbose}}
 	script:
 {{reindent "		" .run.Config.Script}}{{end}}
 `))
@@ -540,7 +522,7 @@ function study {
 
 func info(db diviner.Database, args []string) {
 	flags := flag.NewFlagSet("list", flag.ExitOnError)
-	verbose := flags.Bool("v", false, "verbose output")
+	verbose := flags.Bool("v", false, "show all available information")
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, `usage: diviner info [-v] ids...
 
@@ -558,9 +540,9 @@ Info displays detailed information about studies or runs.`)
 	var tw tabwriter.Writer
 	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
 	for _, arg := range flags.Args() {
-		study, run := splitName(arg)
-		if run == "" {
-			study, err := db.Study(ctx, study)
+		study, seq := splitName(arg)
+		if seq == 0 {
+			study, err := db.LookupStudy(ctx, study)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -568,27 +550,14 @@ Info displays detailed information about studies or runs.`)
 				log.Fatal(err)
 			}
 		} else {
-			run, err := db.Run(ctx, study, run)
+			run, err := db.LookupRun(ctx, study, seq)
 			if err != nil {
 				log.Fatal(err)
-			}
-			metrics, err := run.Metrics(ctx)
-			if err != nil {
-				log.Fatal(err)
-			}
-			var status string
-			if run.State() == diviner.Pending {
-				status, err = run.Status(ctx)
-				if err != nil {
-					log.Error.Printf("failed retrieving status for run %s: %v", run.ID(), err)
-				}
 			}
 			err = runTemplate.Execute(&tw, map[string]interface{}{
 				"study":   study,
 				"run":     run,
-				"metrics": metrics,
 				"verbose": *verbose,
-				"status":  status,
 			})
 			if err != nil {
 				log.Fatal(err)
@@ -596,6 +565,68 @@ Info displays detailed information about studies or runs.`)
 		}
 	}
 	tw.Flush()
+}
+
+func metrics(db diviner.Database, args []string) {
+	flags := flag.NewFlagSet("metrics", flag.ExitOnError)
+	flags.Usage = func() {
+		fmt.Fprintln(os.Stderr, `usage: metrics id
+
+Writes all metrics reported by the provided run to standard output in
+TSV format. Every unique metric name reported over time is a single
+column; missing values are denoted by "NA".`)
+		flags.PrintDefaults()
+		os.Exit(2)
+	}
+	if err := flags.Parse(args); err != nil {
+		log.Fatal(err)
+	}
+	if flags.NArg() != 1 {
+		flags.Usage()
+	}
+	study, seq := splitName(flags.Arg(0))
+	if seq == 0 {
+		log.Fatalf("not a valid run: %s", flags.Arg(0))
+	}
+	ctx := context.Background()
+	run, err := db.LookupRun(ctx, study, seq)
+	if err != nil {
+		log.Fatal(err)
+	}
+	keys := make(map[string]bool)
+	for _, metrics := range run.Metrics {
+		for key := range metrics {
+			keys[key] = true
+		}
+	}
+	sorted := make([]string, 0, len(keys))
+	for key := range keys {
+		sorted = append(sorted, key)
+	}
+	sort.Strings(sorted)
+	w := csv.NewWriter(os.Stdout)
+	w.Comma = '\t'
+	if err := w.Write(sorted); err != nil {
+		log.Fatal(err)
+	}
+	record := make([]string, len(keys))
+	for _, metrics := range run.Metrics {
+		for i, key := range sorted {
+			v, ok := metrics[key]
+			if !ok {
+				record[i] = "NA"
+				continue
+			}
+			record[i] = strconv.FormatFloat(v, 'f', -1, 64)
+		}
+		if err := w.Write(record); err != nil {
+			log.Fatal(err)
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func run(db diviner.Database, args []string) {
@@ -635,8 +666,8 @@ If no studies are specified, all defined studies are run concurrently.`)
 	for i, arg := range args {
 		_, run := splitName(arg)
 		if i == 0 {
-			study = run == ""
-		} else if run == "" != study {
+			study = run == 0
+		} else if run == 0 != study {
 			fmt.Fprintln(os.Stderr, "cannot mix studies and runs")
 			flags.Usage()
 		}
@@ -693,8 +724,8 @@ If no studies are specified, all defined studies are run concurrently.`)
 			runsStudy[i] = find(studies, study)
 		}
 		err := traverser.Each(len(runs), func(i int) (err error) {
-			study, run := splitName(args[i])
-			runs[i], err = db.Run(ctx, study, run)
+			study, seq := splitName(args[i])
+			runs[i], err = db.LookupRun(ctx, study, seq)
 			return
 		})
 		if err != nil {
@@ -702,14 +733,14 @@ If no studies are specified, all defined studies are run concurrently.`)
 		}
 		err = traverse.Each(len(runs), func(i int) (err error) {
 			log.Printf("repeating run %s", args[i])
-			runs[i], err = runner.Run(ctx, runsStudy[i], runs[i].Values())
+			runs[i], err = runner.Run(ctx, runsStudy[i], runs[i].Values)
 			return
 		})
 		if err != nil {
 			log.Fatal(err)
 		}
 		for i, run := range runs {
-			if run.State() != diviner.Success {
+			if run.State != diviner.Success {
 				log.Error.Printf("run %s failed", args[i])
 			}
 		}
@@ -746,8 +777,7 @@ func showScript(db diviner.Database, args []string) {
 Script renders a bash script to standard output containing a function
 for each of the study's datasets and the study itself. The study's
 parameter values can be specified via flags; unspecified parameter
-values are sampled randomly from valid parameter values.
-`)
+values are sampled randomly from valid parameter values.`)
 		flags.PrintDefaults()
 		os.Exit(2)
 	}
@@ -883,54 +913,47 @@ specifying regular expressions for matching them via the flags
 	}
 	studyRuns := make([][]diviner.Run, len(studies))
 	err := traverser.Each(len(studyRuns), func(i int) (err error) {
-		studyRuns[i], err = db.Runs(ctx, studies[i].Name, diviner.Success, time.Time{})
+		studyRuns[i], err = db.ListRuns(ctx, studies[i].Name, diviner.Success, time.Time{})
 		return
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	type runMetrics struct {
-		diviner.Study
-		diviner.Run
-		diviner.Metrics
+	type trial struct {
+		diviner.Trial
+		Run diviner.Run
 	}
-	var runs []runMetrics
-	for i, list := range studyRuns {
-		for _, run := range list {
-			runs = append(runs, runMetrics{Study: studies[i], Run: run})
-		}
-	}
-	err = traverser.Each(len(runs), func(i int) (err error) {
-		runs[i].Metrics, err = runs[i].Run.Metrics(ctx)
-		return
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
+
 	var (
 		n       int
+		trials  []trial
 		values  = make(map[string]bool)
 		metrics = make(map[string]bool)
 	)
-	for _, run := range runs {
-		if _, ok := run.Metrics[objective.Metric]; !ok {
+	for _, runs := range studyRuns {
+		for _, run := range runs {
+			trials = append(trials, trial{run.Trial(), run})
+		}
+	}
+	for _, trial := range trials {
+		if _, ok := trial.Metrics[objective.Metric]; !ok {
 			continue
 		}
-		runs[n] = run
+		trials[n] = trial
 		n++
-		for name := range run.Metrics {
+		for name := range trial.Metrics {
 			metrics[name] = true
 		}
-		for name := range run.Values() {
+		for name := range trial.Values {
 			values[name] = true
 		}
 	}
-	if n < len(runs) {
-		log.Printf("skipping %d runs due to missing metrics", len(runs)-n)
+	if n < len(trials) {
+		log.Printf("skipping %d runs due to missing metrics", len(trials)-n)
 	}
-	sort.SliceStable(runs, func(i, j int) bool {
-		iv, jv := runs[i].Metrics[objective.Metric], runs[j].Metrics[objective.Metric]
+	sort.SliceStable(trials, func(i, j int) bool {
+		iv, jv := trials[i].Metrics[objective.Metric], trials[j].Metrics[objective.Metric]
 		switch objective.Direction {
 		case diviner.Maximize:
 			return jv < iv
@@ -940,8 +963,8 @@ specifying regular expressions for matching them via the flags
 			panic(objective)
 		}
 	})
-	if *numEntries > 0 && len(runs) > *numEntries {
-		runs = runs[:*numEntries]
+	if *numEntries > 0 && len(trials) > *numEntries {
+		trials = trials[:*numEntries]
 	}
 	delete(metrics, objective.Metric)
 	var (
@@ -958,12 +981,12 @@ specifying regular expressions for matching them via the flags
 		fmt.Fprint(&tw, "\t"+strings.Join(valuesOrdered, "\t"))
 	}
 	fmt.Fprintln(&tw)
-	for _, run := range runs {
-		fmt.Fprintf(&tw, "%s:%s\t%.4g", run.Study.Name, run.Run.ID(), run.Metrics[objective.Metric])
+	for _, trial := range trials {
+		fmt.Fprintf(&tw, "%s:%d\t%.4g", trial.Run.Study, trial.Run.Seq, trial.Metrics[objective.Metric])
 		if len(metricsOrdered) > 0 {
 			metrics := make([]string, len(metricsOrdered))
 			for i, name := range metricsOrdered {
-				if v, ok := run.Metrics[name]; ok {
+				if v, ok := trial.Metrics[name]; ok {
 					metrics[i] = fmt.Sprintf("%.3g", v)
 				} else {
 					metrics[i] = "NA"
@@ -974,7 +997,7 @@ specifying regular expressions for matching them via the flags
 		if len(valuesOrdered) > 0 {
 			values := make([]string, len(valuesOrdered))
 			for i, name := range valuesOrdered {
-				if v, ok := run.Values()[name]; ok {
+				if v, ok := trial.Values[name]; ok {
 					switch v.Kind() {
 					default:
 						values[i] = fmt.Sprint(v)
@@ -1014,16 +1037,11 @@ the logs is followed and updates are printed as they become available.
 	if flags.NArg() != 1 {
 		flags.Usage()
 	}
-	ctx := context.Background()
-	parts := strings.SplitN(flags.Arg(0), ":", 2)
-	if len(parts) != 2 {
+	study, seq := splitName(flags.Arg(0))
+	if seq == 0 {
 		log.Fatalf("invalid run name %s", flags.Arg(0))
 	}
-	run, err := db.Run(ctx, parts[0], parts[1])
-	if err != nil {
-		log.Fatalf("error retrieving run %s: %v", flags.Arg(0), err)
-	}
-	if _, err := io.Copy(os.Stdout, run.Log(*follow)); err != nil {
+	if _, err := io.Copy(os.Stdout, db.Log(study, seq, *follow)); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -1031,13 +1049,13 @@ the logs is followed and updates are printed as they become available.
 func databaseGetter(db diviner.Database, since time.Time) func(context.Context, string, bool) []diviner.Study {
 	return func(ctx context.Context, query string, isPrefix bool) []diviner.Study {
 		if !isPrefix {
-			study, err := db.Study(ctx, query)
+			study, err := db.LookupStudy(ctx, query)
 			if err != nil {
 				log.Fatal(err)
 			}
 			return []diviner.Study{study}
 		}
-		studies, err := db.Studies(ctx, query, since)
+		studies, err := db.ListStudies(ctx, query, since)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -1112,16 +1130,20 @@ func filterAndSort(keys map[string]bool, match string) []string {
 	return sorted
 }
 
-func splitName(name string) (study, run string) {
+func splitName(name string) (study string, seq uint64) {
 	parts := strings.SplitN(name, ":", 2)
 	switch len(parts) {
 	case 1:
-		return parts[0], ""
+		return parts[0], 0
 	case 2:
 		if parts[1] == "" {
-			log.Fatalf("%s: empty run ID", name)
+			log.Fatalf("%s: empty run seq", name)
 		}
-		return parts[0], parts[1]
+		seq, err := strconv.ParseUint(parts[1], 10, 64)
+		if err != nil {
+			log.Fatalf("invalid name %s: %v", name, err)
+		}
+		return parts[0], seq
 	default:
 		panic(parts)
 	}

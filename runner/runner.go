@@ -26,9 +26,13 @@ import (
 	"github.com/grailbio/diviner/localdb"
 )
 
-// IdleTime is the amount of time workers are allowed to remain idle
-// before being stopped.
-const idleTime = 5 * time.Minute
+const (
+	// IdleTime is the amount of time workers are allowed to remain idle
+	// before being stopped.
+	idleTime = 5 * time.Minute
+
+	keepaliveInterval = 15 * time.Second
+)
 
 // A Runner is responsible for creating a cluster of machines and running
 // trials on the cluster.
@@ -115,7 +119,7 @@ func (r *Runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		row := make([]string, len(sorted)+5)
 
 		for _, run := range r.runs[name] {
-			row[0] = fmt.Sprint(run.ID())
+			row[0] = fmt.Sprint(run.Run.Seq)
 			for i, key := range sorted {
 				if v, ok := run.Values[key]; ok {
 					row[i+1] = v.String()
@@ -292,20 +296,43 @@ outer:
 // of the run itself. The run is registered with the runner and will
 // show up in the various introspection facilities. Run
 func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Values) (diviner.Run, error) {
+	pctx := ctx
+	ctx, cancel := context.WithCancel(ctx)
 	config, err := study.Run(values)
 	if err != nil {
-		return nil, err
+		return diviner.Run{}, err
+	}
+	if _, err := r.db.CreateStudyIfNotExist(ctx, study); err != nil {
+		return diviner.Run{}, err
 	}
 	run := new(run)
-	run.Run, err = r.db.New(ctx, study, values, config)
+	run.Run, err = r.db.InsertRun(ctx, diviner.Run{Study: study.Name, Values: values, Config: config})
 	if err != nil {
-		return nil, err
+		return diviner.Run{}, err
 	}
 	run.Study = study
 	run.Values = values
 	run.Config = config
 	r.add(run)
 	defer r.remove(run)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		tick := time.NewTicker(keepaliveInterval)
+		defer tick.Stop()
+		defer wg.Done()
+		for {
+			select {
+			case <-tick.C:
+			case <-ctx.Done():
+				return
+			}
+			status, message, elapsed := run.Status()
+			if err := r.db.UpdateRun(ctx, study.Name, run.Run.Seq, diviner.Pending, fmt.Sprintf("%s: %s", status, message), elapsed); err != nil && err != context.Canceled {
+				log.Error.Printf("run %s:%d: error setting status: %v", run.Run.Study, run.Run.Seq, message)
+			}
+		}
+	}()
 	run.Do(ctx, r)
 	status, message, elapsed := run.Status()
 	log.Printf("run %s: %s %s %s", run, status, message, elapsed)
@@ -318,26 +345,27 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 	case statusErr:
 		log.Error.Printf("run %s error: %v", run, message)
 	}
-	if err := run.Complete(ctx, state, elapsed); err != nil {
-		log.Error.Printf("failed to complete run %s: %v", run, err)
-		return nil, err
+	cancel()
+	ctx = pctx
+	wg.Wait()
+	status, message, elapsed = run.Status()
+	if err := r.db.UpdateRun(ctx, study.Name, run.Run.Seq, state, "", elapsed); err != nil {
+		log.Error.Printf("run %s:%d: error setting status: %v", run.Run.Study, run.Run.Seq, message)
+		return diviner.Run{}, err
 	}
-	return run.Run, nil
+	// Refresh the run status before we return it.
+	run.Run, err = r.db.LookupRun(ctx, study.Name, run.Run.Seq)
+	return run.Run, err
 }
 
 func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (done bool, err error) {
-	complete, err := r.db.Runs(ctx, study.Name, diviner.Success, time.Time{})
+	complete, err := r.db.ListRuns(ctx, study.Name, diviner.Success, time.Time{})
 	if err != nil && err != localdb.ErrNoSuchStudy {
 		return false, err
 	}
 	trials := make([]diviner.Trial, len(complete))
 	for i, run := range complete {
-		trials[i].Values = run.Values()
-		var err error
-		trials[i].Metrics, err = run.Metrics(ctx)
-		if err != nil {
-			return false, err
-		}
+		trials[i] = run.Trial()
 	}
 	log.Printf("%s: requesting new points from oracle from %d trials", study.Name, len(trials))
 	values, err := study.Oracle.Next(trials, study.Params, study.Objective, ntrials)
@@ -356,7 +384,7 @@ func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (d
 		return false, err
 	}
 	for _, run := range runs {
-		if run.State() != diviner.Success {
+		if run.State != diviner.Success {
 			return false, nil
 		}
 	}

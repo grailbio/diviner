@@ -56,6 +56,7 @@ func TestSetRetryBackoff(d time.Duration) {
 type worker struct {
 	// Machine is the bigmachine machine represented by this worker.
 	*bigmachine.Machine
+
 	// Session is initially nil. (*worker).Start sets this field to one of the
 	// entries in Candidates after it successfully allocates a machine.
 	Session *session
@@ -87,11 +88,18 @@ func (w *worker) Start(ctx context.Context) {
 	for try := 0; ; try++ {
 		// TODO(marius): distinguish between true allocation errors
 		// and others that may occur.
+		//
+		// TODO(saito) unify machineLimit and retry.
+		w.Machine = nil
+		w.Session = nil
 		if err := machineLimit.Wait(ctx); err != nil {
 			w.err = err
 			return
 		}
 		sess := w.Candidates[try%len(w.Candidates)]
+		if !sess.tryAcquire() { // too many workers allocated in this session already.
+			continue
+		}
 		machines, err := sess.B.Start(ctx, 1, bigmachine.Services{
 			"Cmd": &commandService{},
 		})
@@ -103,6 +111,8 @@ func (w *worker) Start(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				w.err = ctx.Err()
+				w.Session = nil
+				sess.release()
 				return
 			case <-time.After(5 * time.Minute):
 				err = errors.New("timeout while waiting for machine to start")
@@ -115,6 +125,7 @@ func (w *worker) Start(ctx context.Context) {
 		if err == nil {
 			break
 		}
+		sess.release()
 		// HACK: this should be propagated as a semantic error annotation.
 		if !strings.Contains(err.Error(), "InstanceLimitExceeded") {
 			log.Error.Printf("failed to allocate machine: %v", err)

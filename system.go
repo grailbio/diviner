@@ -15,6 +15,9 @@ type System struct {
 	bigmachine.System
 	// ID is a unique identifier for this system.
 	ID string
+	// Parallelism specifies the maximum level of job parallelism allowable for
+	// this system. If <= 0, the system allows unlimited parallelism.
+	Parallelism int
 }
 
 // String implements starlark.Value.

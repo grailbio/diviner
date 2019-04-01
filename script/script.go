@@ -28,9 +28,11 @@
 //	maximize(metric)
 //		Defines an objective that maximizes a metric (string).
 //
-//	localsystem(name)
-//		Defines a new local system with the provided name.
-//		The name is used to identify the system in tools.
+//	localsystem(name, parallelism?)
+//		Defines a new local system with the provided name.  The name is used to
+//		identify the system in tools.  The parallelism limits the number of jobs
+//		that run on this system simultaneously.  If parallelism is unset, it
+//    defaults to ∞.
 //
 //	ec2system(name, ami, instance_profile, instance_type, disk_space?, data_space?, on_demand?, flavor?)
 //		Defines a new EC2-based system of the given name, and configuration.
@@ -486,6 +488,7 @@ func makeLocalSystem(thread *starlark.Thread, _ *starlark.Builtin, args starlark
 	err := starlark.UnpackArgs(
 		"localsystem", args, kwargs,
 		"name", &system.ID,
+		"parallelism?", &system.Parallelism,
 	)
 	return system, err
 }

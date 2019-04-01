@@ -219,7 +219,11 @@ outer:
 					var w *worker
 					w, sess.Idle = sess.Idle[0], sess.Idle[1:]
 					log.Printf("worker %s idled out from pool", w)
+					if w.Session != sess {
+						panic(w)
+					}
 					w.Cancel()
+					sess.release()
 					nworker--
 				}
 			}
@@ -251,6 +255,9 @@ outer:
 				}
 				reqSessions = append(reqSessions, sess)
 			}
+			if len(reqSessions) == 0 {
+				break
+			}
 			w := &worker{
 				Candidates: reqSessions,
 				returnc:    workerc,
@@ -261,6 +268,9 @@ outer:
 		case w := <-workerc:
 			if err := w.Err(); err != nil {
 				// TODO(marius): allocate a new worker to replace this one.
+				if w.Session != nil {
+					panic(fmt.Sprintf("nonnil session, %v %v", w, w.Err()))
+				}
 				nworker--
 				log.Error.Printf("worker %s error: %v", w, err)
 				break
@@ -498,4 +508,35 @@ type session struct {
 	Requests map[*request]struct{}
 	// Idle is the set of idle workers in this system.
 	Idle []*worker
+
+	mu sync.Mutex
+	// # of workers running in this session.
+	//
+	// INVARIANT: System.Pararallelism == 0 || nWorker <= System.Parallelism
+	nWorker int
+}
+
+func (s *session) tryAcquire() bool {
+	if s.System.Parallelism <= 0 {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nWorker >= s.System.Parallelism {
+		return false
+	}
+	s.nWorker++
+	return true
+}
+
+func (s *session) release() {
+	if s.System.Parallelism <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nWorker--
+	if s.nWorker < 0 {
+		panic(s)
+	}
 }

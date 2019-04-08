@@ -384,6 +384,7 @@ func list(db diviner.Database, args []string) {
 		runState  = flags.String("state", "pending,success,failure", "list of run states to query")
 		status    = flags.Bool("s", false, "show status for pending runs")
 		sinceFlag = flags.String("since", "", "only show entries that have been updated since the provided date or duration")
+		valuesRe  = flags.String("values", "^$", "comma-sepatated list of anchored regular expression matching parameter values to display")
 	)
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, `usage:
@@ -455,7 +456,19 @@ the given study names.`)
 	if err != nil {
 		log.Fatal(err)
 	}
-	now := time.Now()
+	valueKeys := make(map[string]bool)
+	for i := range studies {
+		for _, run := range runs[i] {
+			for name := range run.Values {
+				valueKeys[name] = true
+			}
+		}
+	}
+	var (
+		valuesOrdered = matchAndSort(valueKeys, *valuesRe)
+		values        = make([]string, len(valuesOrdered))
+		now           = time.Now()
+	)
 	for i, study := range studies {
 		for _, run := range runs[i] {
 			var layout = time.Kitchen
@@ -470,9 +483,19 @@ the given study names.`)
 			if !*status {
 				run.Status = ""
 			}
-			fmt.Fprintf(&tw, "%s:%d\t%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(&tw, "%s:%d\t%s\t%s\t%s\t%s",
 				study.Name, run.Seq, run.Created.Local().Format(layout),
 				runtime, run.State, run.Status)
+			values = values[:0]
+			for _, key := range valuesOrdered {
+				if v, ok := run.Values[key]; ok {
+					values = append(values, fmt.Sprintf("%s:%s", key, v))
+				}
+			}
+			if len(values) > 0 {
+				fmt.Fprint(&tw, "\t", strings.Join(values, " "))
+			}
+			fmt.Fprintln(&tw)
 		}
 	}
 	tw.Flush()
@@ -862,8 +885,8 @@ func leaderboard(db diviner.Database, args []string) {
 		flags             = flag.NewFlagSet("leaderboard", flag.ExitOnError)
 		objectiveOverride = flags.String("objective", "", "objective to use instead of studies' shared objective")
 		numEntries        = flags.Int("n", 10, "number of top trials to display")
-		valuesRe          = flags.String("values", "^$", "regular expression matching parameter values to display")
-		metricsRe         = flags.String("metrics", "^$", "regular expression matching additional metrics to display")
+		valuesRe          = flags.String("values", "^$", "comma-sepatated list of anchored regular expression matching parameter values to display")
+		metricsRe         = flags.String("metrics", "^$", "comma-sepatated list of anchored regular expression matching additional metrics to display")
 	)
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, `usage: diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...
@@ -968,8 +991,8 @@ specifying regular expressions for matching them via the flags
 	}
 	delete(metrics, objective.Metric)
 	var (
-		metricsOrdered = filterAndSort(metrics, *metricsRe)
-		valuesOrdered  = filterAndSort(values, *valuesRe)
+		metricsOrdered = matchAndSort(metrics, *metricsRe)
+		valuesOrdered  = matchAndSort(values, *valuesRe)
 		tw             tabwriter.Writer
 	)
 	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
@@ -1113,20 +1136,24 @@ func studies(ctx context.Context, args []string, get func(context.Context, strin
 	return studies[:n+1]
 }
 
-func filterAndSort(keys map[string]bool, match string) []string {
-	re, err := regexp.Compile(match)
-	if err != nil {
-		log.Fatal(err)
-	}
+func matchAndSort(keys map[string]bool, match string) []string {
 	sorted := make([]string, 0, len(keys))
-	for k := range keys {
-		if !re.MatchString(k) {
-			delete(keys, k)
-			continue
+	for _, m := range strings.Split(match, ",") {
+		re, err := regexp.Compile(m)
+		if err != nil {
+			log.Fatal(err)
 		}
-		sorted = append(sorted, k)
+		i := len(sorted)
+		for k := range keys {
+			if !re.MatchString(k) {
+				continue
+			}
+			sorted = append(sorted, k)
+			delete(keys, k)
+		}
+		// We sort the expansions, but retain the order of the list of matches.
+		sort.Strings(sorted[i:len(sorted)])
 	}
-	sort.Strings(sorted)
 	return sorted
 }
 

@@ -531,13 +531,11 @@ var (
 	runConfigTemplate = template.Must(template.New("run_config").Funcs(runFuncMap).Parse(`{{range $_, $dataset :=  .Datasets}}function dataset{{$dataset.Name}} {
 #	if_not_exist:	{{$dataset.IfNotExist}}
 #	local_files:	{{join $dataset.LocalFiles ", "}}
-#	system:	{{$dataset.System.ID}}
 
 {{$dataset.Script}}
 }{{end}}
 function study {
 #	local_files:	{{join .LocalFiles ", "}}
-#	system:	{{.System.ID}}
 {{.Script}}
 }
 `))

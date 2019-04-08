@@ -6,6 +6,7 @@ package diviner
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 )
@@ -92,6 +93,9 @@ func (r Run) Trial() Trial {
 	}
 	return trial
 }
+
+// ErrNotExist is returned from a database when a study or run does not exist.
+var ErrNotExist = errors.New("study or run does not exist")
 
 // A Database is used to track and manage studies and runs.
 type Database interface {

@@ -25,16 +25,6 @@ import (
 const keepaliveInterval = 30 * time.Second
 
 var (
-	// ErrNoSuchRun is returned when the requested run does not exist.
-	ErrNoSuchRun = errors.New("no such run")
-	// ErrInvalidRunId is returned when an invalid run ID was provided.
-	ErrInvalidRunId = errors.New("invalid run ID")
-	// ErrNoSuchStudy is returned when the requested study does not
-	// exist.
-	ErrNoSuchStudy = errors.New("no such study")
-)
-
-var (
 	studiesKey = []byte("studies")
 	metaKey    = []byte("meta")
 	updatedKey = []byte("updated")
@@ -84,7 +74,7 @@ func (d *DB) LookupStudy(ctx context.Context, name string) (study diviner.Study,
 	err = d.db.View(func(tx *bolt.Tx) error {
 		b := lookup(tx, studiesKey, name)
 		if b == nil {
-			return ErrNoSuchStudy
+			return diviner.ErrNotExist
 		}
 		if ok, err := get(b, metaKey, &study); err != nil {
 			return err
@@ -134,7 +124,7 @@ func (d *DB) InsertRun(ctx context.Context, run diviner.Run) (diviner.Run, error
 	err := d.db.Update(func(tx *bolt.Tx) (e error) {
 		b := lookup(tx, studiesKey, run.Study)
 		if b == nil {
-			return ErrNoSuchStudy
+			return diviner.ErrNotExist
 		}
 		b, _ = create(b, runsKey)
 		if b == nil {
@@ -161,12 +151,12 @@ func (d *DB) UpdateRun(ctx context.Context, study string, seq uint64, state divi
 	return d.db.Update(func(tx *bolt.Tx) (e error) {
 		b := lookup(tx, runKey{study, seq})
 		if b == nil {
-			return ErrNoSuchRun
+			return diviner.ErrNotExist
 		}
 		var run diviner.Run
 		ok, err := get(b, metaKey, &run)
 		if err == nil && !ok {
-			return ErrNoSuchRun
+			return diviner.ErrNotExist
 		}
 		run.Updated = time.Now()
 		run.State = state
@@ -185,7 +175,7 @@ func (d *DB) AppendRunMetrics(ctx context.Context, study string, seq uint64, met
 	return d.db.Update(func(tx *bolt.Tx) (e error) {
 		b := lookup(tx, runKey{study, seq})
 		if b == nil {
-			return ErrNoSuchRun
+			return diviner.ErrNotExist
 		}
 		b, _ = create(b, metricsKey)
 		if b == nil {
@@ -201,7 +191,7 @@ func (d *DB) ListRuns(ctx context.Context, study string, states diviner.RunState
 	err = d.db.View(func(tx *bolt.Tx) error {
 		b := lookup(tx, studiesKey, study)
 		if b == nil {
-			return ErrNoSuchStudy
+			return diviner.ErrNotExist
 		}
 		b = lookup(b, runsKey)
 		if b == nil {
@@ -250,11 +240,11 @@ func (d *DB) LookupRun(ctx context.Context, study string, seq uint64) (run divin
 	err = d.db.View(func(tx *bolt.Tx) error {
 		b := lookup(tx, runKey{study, seq})
 		if b == nil {
-			return ErrNoSuchRun
+			return diviner.ErrNotExist
 		}
 		ok, err := get(b, metaKey, &run)
 		if err == nil && !ok {
-			err = ErrNoSuchRun
+			err = diviner.ErrNotExist
 		}
 		if err != nil {
 			return err

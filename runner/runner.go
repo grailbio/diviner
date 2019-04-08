@@ -23,7 +23,6 @@ import (
 	"github.com/grailbio/base/traverse"
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/diviner"
-	"github.com/grailbio/diviner/localdb"
 )
 
 const (
@@ -370,7 +369,7 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 
 func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (done bool, err error) {
 	complete, err := r.db.ListRuns(ctx, study.Name, diviner.Success, time.Time{})
-	if err != nil && err != localdb.ErrNoSuchStudy {
+	if err != nil && err != diviner.ErrNotExist {
 		return false, err
 	}
 	trials := make([]diviner.Trial, len(complete))

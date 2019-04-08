@@ -10,6 +10,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/grailbio/diviner"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -80,7 +81,7 @@ func (r *runReader) Read(p []byte) (n int, err error) {
 		err = r.db.View(func(tx *bolt.Tx) error {
 			b := lookup(tx, runKey{r.study, r.seq})
 			if b == nil {
-				return ErrNoSuchRun
+				return diviner.ErrNotExist
 			}
 			b = b.Bucket(logsKey)
 			if b == nil {

@@ -116,6 +116,9 @@ func (d *DB) LookupStudy(ctx context.Context, name string) (study diviner.Study,
 	if err != nil {
 		return
 	}
+	if meta := out.Item["meta"]; meta == nil || meta.B == nil {
+		return diviner.Study{}, diviner.ErrNotExist
+	}
 	err = gob.NewDecoder(bytes.NewReader(out.Item["meta"].B)).Decode(&study)
 	return
 }

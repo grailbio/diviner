@@ -11,7 +11,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
-	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -22,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/grailbio/base/errors"
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/base/traverse"
 	"github.com/grailbio/diviner"
@@ -298,7 +298,7 @@ func (d *DB) ListRuns(ctx context.Context, study string, states diviner.RunState
 		if err != nil {
 			return nil, err
 		}
-		return d.appendRuns(nil, states, since, items...)
+		return d.appendRuns(nil, study, states, since, items...)
 	}
 
 	var lastKey map[string]*dynamodb.AttributeValue
@@ -323,7 +323,7 @@ func (d *DB) ListRuns(ctx context.Context, study string, states diviner.RunState
 		if err != nil {
 			return nil, err
 		}
-		runs, err = d.appendRuns(runs, states, since, out.Items...)
+		runs, err = d.appendRuns(runs, study, states, since, out.Items...)
 		if err != nil {
 			return nil, err
 		}
@@ -466,12 +466,13 @@ func (d *DB) querySince(ctx context.Context, since time.Time, newQuery func() *d
 	return items, nil
 }
 
-func (d *DB) appendRuns(runs []diviner.Run, states diviner.RunState, since time.Time, items ...map[string]*dynamodb.AttributeValue) ([]diviner.Run, error) {
+func (d *DB) appendRuns(runs []diviner.Run, study string, states diviner.RunState, since time.Time, items ...map[string]*dynamodb.AttributeValue) ([]diviner.Run, error) {
 	minPendingTime := time.Now().Add(-2 * keepaliveInterval)
-	for _, item := range items {
+	for i, item := range items {
 		run, err := unmarshal(item)
 		if err != nil {
-			return runs, err
+			log.Error.Printf("dropping run %d of study %s unmarshal: %v", i, study, err)
+			continue
 		}
 		if run.State == diviner.Pending && run.Updated.Before(minPendingTime) {
 			continue
@@ -563,7 +564,7 @@ func unmarshal(attrs map[string]*dynamodb.AttributeValue) (diviner.Run, error) {
 	run.Study = dyrun.Study
 	run.Seq = dyrun.Seq
 	if err := gob.NewDecoder(bytes.NewReader(dyrun.Values)).Decode(&run.Values); err != nil {
-		return diviner.Run{}, err
+		return diviner.Run{}, errors.E("decode values", err)
 	}
 	run.Metrics = dyrun.Metrics
 	switch dyrun.State {
@@ -595,7 +596,7 @@ func unmarshal(attrs map[string]*dynamodb.AttributeValue) (diviner.Run, error) {
 	}
 
 	if err := gob.NewDecoder(bytes.NewReader(dyrun.Config)).Decode(&run.Config); err != nil {
-		return diviner.Run{}, err
+		return diviner.Run{}, errors.E("decode config", err)
 	}
 	return run, nil
 }

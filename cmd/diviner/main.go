@@ -384,7 +384,7 @@ func list(db diviner.Database, args []string) {
 		runState  = flags.String("state", "pending,success,failure", "list of run states to query")
 		status    = flags.Bool("s", false, "show status for pending runs")
 		sinceFlag = flags.String("since", "", "only show entries that have been updated since the provided date or duration")
-		valuesRe  = flags.String("values", "^$", "comma-sepatated list of anchored regular expression matching parameter values to display")
+		valuesRe  = flags.String("values", "^$", "comma-separated list of anchored regular expression matching parameter values to display")
 	)
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, `usage:
@@ -589,7 +589,10 @@ Info displays detailed information about studies or runs.`)
 }
 
 func metrics(db diviner.Database, args []string) {
-	flags := flag.NewFlagSet("metrics", flag.ExitOnError)
+	var (
+		flags     = flag.NewFlagSet("metrics", flag.ExitOnError)
+		metricsRe = flags.String("metrics", ".*", "comma-separated list of anchored regular expression matching metrics to display")
+	)
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, `usage: metrics id
 
@@ -620,17 +623,13 @@ column; missing values are denoted by "NA".`)
 			keys[key] = true
 		}
 	}
-	sorted := make([]string, 0, len(keys))
-	for key := range keys {
-		sorted = append(sorted, key)
-	}
-	sort.Strings(sorted)
+	sorted := matchAndSort(keys, *metricsRe)
 	w := csv.NewWriter(os.Stdout)
 	w.Comma = '\t'
 	if err := w.Write(sorted); err != nil {
 		log.Fatal(err)
 	}
-	record := make([]string, len(keys))
+	record := make([]string, len(sorted))
 	for _, metrics := range run.Metrics {
 		for i, key := range sorted {
 			v, ok := metrics[key]
@@ -883,8 +882,8 @@ func leaderboard(db diviner.Database, args []string) {
 		flags             = flag.NewFlagSet("leaderboard", flag.ExitOnError)
 		objectiveOverride = flags.String("objective", "", "objective to use instead of studies' shared objective")
 		numEntries        = flags.Int("n", 10, "number of top trials to display")
-		valuesRe          = flags.String("values", "^$", "comma-sepatated list of anchored regular expression matching parameter values to display")
-		metricsRe         = flags.String("metrics", "^$", "comma-sepatated list of anchored regular expression matching additional metrics to display")
+		valuesRe          = flags.String("values", "^$", "comma-separated list of anchored regular expression matching parameter values to display")
+		metricsRe         = flags.String("metrics", "^$", "comma-separated list of anchored regular expression matching additional metrics to display")
 	)
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, `usage: diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...

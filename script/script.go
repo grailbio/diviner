@@ -96,10 +96,11 @@
 //		                    one of "sampling", "lgbfs" (by default it is automatically
 //		                    selected).
 //
-//  	command(script, interpreter?="bash -c")
+//  	command(script, interpreter?="bash -c", strip?=False)
 //		Run a subprocess and return its standard output as a string.
 //		- script: the script to run; a string.
 //		- interpreter: command that runs the script. It defaults to "bash -c".
+//		- strip: strip leading and training whitespace from the command's output.
 //
 // 	For example, command("print('foo'*2)", interpreter="python3 -c") will produce
 //	"foofoo\n".
@@ -150,6 +151,7 @@ func init() {
 	// So that we can, e.g., define studies in a toplevel loop.
 	resolve.AllowGlobalReassign = true
 	resolve.AllowRecursion = true
+	resolve.AllowNestedDef = true
 }
 
 var builtins = starlark.StringDict{
@@ -558,11 +560,13 @@ func makeCommand(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	var (
 		script      string
 		interpreter = "bash -c"
+		strip       bool
 	)
 	err := starlark.UnpackArgs(
 		"command", args, kwargs,
 		"script", &script,
 		"interpreter?", &interpreter,
+		"strip?", &strip,
 	)
 	if err != nil {
 		return nil, err
@@ -579,7 +583,11 @@ func makeCommand(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	if err := cmd.Run(); err != nil {
 		return nil, err
 	}
-	return starlark.String(outbuf.Bytes()), nil
+	out := outbuf.Bytes()
+	if strip {
+		out = bytes.TrimSpace(out)
+	}
+	return starlark.String(out), nil
 }
 
 func makeTempFile(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

@@ -9,12 +9,6 @@
 // Script defines the following builtins for defining Diviner
 // configurations (question marks indicate optional arguments):
 //
-//	config(database, table)
-//		Configures Diviner to use the provided database
-//		("local" or "dynamodb") and the given table
-//		(local filename or dynamodb table name) to store
-// 		all study state.
-//
 //	discrete(v1, v2, v3...)
 //		Defines a discrete parameter that takes on the provided set
 //		set of values (types string, float, or int).
@@ -32,11 +26,11 @@
 //		Defines a new local system with the provided name.  The name is used to
 //		identify the system in tools.  The parallelism limits the number of jobs
 //		that run on this system simultaneously.  If parallelism is unset, it
-//    defaults to ∞.
+//		defaults to ∞.
 //
 //	ec2system(name, ami, instance_profile, instance_type, disk_space?, data_space?, on_demand?, flavor?)
 //		Defines a new EC2-based system of the given name, and configuration.
-//    The provided name is used to identify the system in tools.
+//		The provided name is used to identify the system in tools.
 //		- ami:              the EC2 AMI to use when launching new instances;
 //		- instance_profile: the IAM instance profile assigned to new instances;
 //		- instance_type:    the instance type used;
@@ -79,7 +73,9 @@
 //		             to be optimized;
 //		- run:       a function that returns a run_config for a set
 //		             of parameter values; the first argument to the function
-//		             is a dictionary of parameter values.
+//		             is a dictionary of parameter values. An optional second
+//		             argument provides the ID for the run. This can be used
+//		             to name data and other external resources.
 //		- oracle:    the oracle to use (grid search by default).
 //
 //	grid_search
@@ -333,7 +329,7 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 			return nil, fmt.Errorf("parameter %s is not a valid parameter", string(keystr))
 		}
 	}
-	study.Run = func(vals diviner.Values) (diviner.RunConfig, error) {
+	study.Run = func(vals diviner.Values, runID string) (diviner.RunConfig, error) {
 		var input starlark.Dict
 		for key, value := range vals {
 			var val starlark.Value
@@ -353,7 +349,11 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 		thread := &starlark.Thread{
 			Name: "diviner",
 		}
-		val, err := starlark.Call(thread, runner, starlark.Tuple{&input}, nil)
+		args := starlark.Tuple{&input}
+		if runner.NumParams() > 1 {
+			args = append(args, starlark.String(runID))
+		}
+		val, err := starlark.Call(thread, runner, args, nil)
 		if err != nil {
 			return diviner.RunConfig{}, err
 		}

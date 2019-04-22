@@ -121,10 +121,7 @@
 //	)
 //
 // Scripts defined in a trial's run configuration are run on the specified
-// machine under its default user and environment. The environment
-// variable DIVINER_RUN_ID contains the trial's run id (in the form of
-// study_name:run_number) so that, for example, the script's output
-// may be persisted by the trial's name and looked up later.
+// machine under its default user and environment.
 //
 // With a configuration in hand, the diviner tool is used to conduct trails,
 // and examine study results.
@@ -802,6 +799,7 @@ values are sampled randomly from valid parameter values.`)
 		flags.PrintDefaults()
 		os.Exit(2)
 	}
+	ident := flags.String("ident", "run_ident", "run ID to use for the rendered run")
 	if err := flags.Parse(args); err != nil {
 		log.Fatal(err)
 	}
@@ -866,7 +864,7 @@ values are sampled randomly from valid parameter values.`)
 			log.Fatalf("value %s is not valid for parameter %s %s", val, name, p)
 		}
 	}
-	config, err := study.Run(values)
+	config, err := study.Run(values, *ident)
 	if err != nil {
 		log.Fatal(err)
 	}

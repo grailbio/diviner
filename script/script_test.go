@@ -50,7 +50,7 @@ func TestScript(t *testing.T) {
 	runConfig, err := studies[0].Run(diviner.Values{
 		"learning_rate": diviner.Float(0.1),
 		"dropout":       diviner.Float(0.5),
-	})
+	}, "testrun")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,6 +64,24 @@ func TestScript(t *testing.T) {
 	}
 	if got, want := runConfig, expect; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestScriptIdent(t *testing.T) {
+	studies, err := script.Load("testdata/ident.dv", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(studies), 1; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	study := studies[0]
+	config, err := study.Run(nil, "test1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := config.Script, "test1"; got != want {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 

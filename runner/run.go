@@ -128,8 +128,7 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 	r.mu.Lock()
 	r.start = time.Now()
 	r.mu.Unlock()
-	env := []string{fmt.Sprintf("DIVINER_RUN_ID=%s:%d", r.Run.Study, r.Run.Seq)}
-	out, err := w.Run(ctx, r.Config.Script, env)
+	out, err := w.Run(ctx, r.Config.Script, nil)
 	if err != nil {
 		r.errorf("failed to start script: %s", err)
 		return

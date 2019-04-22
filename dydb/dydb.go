@@ -205,10 +205,12 @@ func (d *DB) studies(ctx context.Context, prefix string, segment, totalSegments 
 // InsertRun inserts a new run into the provided study. The returned run is
 // assigned a fresh sequence number and is returned with state Pending.
 func (d *DB) InsertRun(ctx context.Context, run diviner.Run) (diviner.Run, error) {
-	var err error
-	run.Seq, err = d.nextSeq(ctx, run.Study)
-	if err != nil {
-		return diviner.Run{}, err
+	if run.Seq == 0 {
+		var err error
+		run.Seq, err = d.NextSeq(ctx, run.Study)
+		if err != nil {
+			return diviner.Run{}, err
+		}
 	}
 	run.State = diviner.Pending
 	run.Status = ""
@@ -391,8 +393,8 @@ func (d *DB) keepaliveStudy(ctx context.Context, study string) {
 	}()
 }
 
-// nextSeq retrieves the next run ID for the provided study.
-func (d *DB) nextSeq(ctx context.Context, study string) (uint64, error) {
+// NextSeq reserves the next run ID for the provided study.
+func (d *DB) NextSeq(ctx context.Context, study string) (uint64, error) {
 	input := &dynamodb.UpdateItemInput{
 		TableName: aws.String(d.table),
 		Key: map[string]*dynamodb.AttributeValue{

@@ -119,6 +119,23 @@ func (d *DB) ListStudies(ctx context.Context, prefix string, since time.Time) (s
 	return
 }
 
+// NextSeq reserves and returns the next sequence number for the provided study.
+func (d *DB) NextSeq(ctx context.Context, study string) (seq uint64, err error) {
+	err = d.db.Update(func(tx *bolt.Tx) (e error) {
+		b := lookup(tx, studiesKey, study)
+		if b == nil {
+			return diviner.ErrNotExist
+		}
+		b, _ = create(b, runsKey)
+		if b == nil {
+			return errors.New("failed to create bucket for runs")
+		}
+		seq, _ = b.NextSequence()
+		return nil
+	})
+	return
+}
+
 // New implements diviner.Database.
 func (d *DB) InsertRun(ctx context.Context, run diviner.Run) (diviner.Run, error) {
 	err := d.db.Update(func(tx *bolt.Tx) (e error) {
@@ -130,7 +147,9 @@ func (d *DB) InsertRun(ctx context.Context, run diviner.Run) (diviner.Run, error
 		if b == nil {
 			return errors.New("failed to create bucket for runs")
 		}
-		run.Seq, _ = b.NextSequence()
+		if run.Seq == 0 {
+			run.Seq, _ = b.NextSequence()
+		}
 		run.Created = time.Now()
 		run.Updated = run.Created
 		run.State = diviner.Pending

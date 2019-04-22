@@ -1,9 +1,4 @@
 
-config(
-    database="local",
-    table="test",
-)
-
 local = localsystem("local")
 local2 = localsystem("local2")
 

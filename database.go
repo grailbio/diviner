@@ -108,10 +108,15 @@ type Database interface {
 	// last update time is not before the provided time.
 	ListStudies(ctx context.Context, prefix string, since time.Time) ([]Study, error)
 
+	// NextSeq reserves and returns the next run sequence number for the
+	// provided study.
+	NextSeq(ctx context.Context, study string) (uint64, error)
 	// InsertRun inserts the provided run into a study. The run's study,
 	// values, and config must be populated; other fields are ignored.
-	// The run's study must already exist, and the returned Run is
-	// assigned a sequence number, state, and creation time.
+	// If the sequence number is provided (>0), then it is assumed to
+	// have been reserved by NextSeq. The run's study must already
+	// exist, and the returned Run is assigned a sequence number, state,
+	// and creation time.
 	InsertRun(ctx context.Context, run Run) (Run, error)
 	// UpdateRun updates the run named by the provided study and
 	// sequence number with the given run state, message, and runtime.

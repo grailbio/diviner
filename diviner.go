@@ -291,7 +291,10 @@ type Study struct {
 	// instantiation of values in the ranges as indicated by the black
 	// box parameters defined above); it produces a run configuration
 	// which is then used to conduct a trial of these parameter values.
-	Run func(vals Values) (RunConfig, error) `json:"-"`
+	// Parameter id is a unique id for the run (vis-a-vis diviner's
+	// database). It may be used to name data and other external
+	// resources associated with the run.
+	Run func(vals Values, id string) (RunConfig, error) `json:"-"`
 }
 
 // String returns a textual description of the study.

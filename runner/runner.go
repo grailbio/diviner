@@ -307,15 +307,22 @@ outer:
 func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Values) (diviner.Run, error) {
 	pctx := ctx
 	ctx, cancel := context.WithCancel(ctx)
-	config, err := study.Run(values)
-	if err != nil {
-		return diviner.Run{}, err
-	}
 	if _, err := r.db.CreateStudyIfNotExist(ctx, study); err != nil {
 		return diviner.Run{}, err
 	}
+	seq, err := r.db.NextSeq(ctx, study.Name)
+	if err != nil {
+		return diviner.Run{}, err
+	}
+	if seq == 0 {
+		return diviner.Run{}, fmt.Errorf("invalid run sequence: %d", seq)
+	}
+	config, err := study.Run(values, fmt.Sprintf("%s:%d", study.Name, seq))
+	if err != nil {
+		return diviner.Run{}, err
+	}
 	run := new(run)
-	run.Run, err = r.db.InsertRun(ctx, diviner.Run{Study: study.Name, Values: values, Config: config})
+	run.Run, err = r.db.InsertRun(ctx, diviner.Run{Study: study.Name, Seq: seq, Values: values, Config: config})
 	if err != nil {
 		return diviner.Run{}, err
 	}

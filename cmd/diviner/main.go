@@ -221,6 +221,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"text/tabwriter"
 	"text/template"
@@ -883,7 +884,10 @@ func leaderboard(db diviner.Database, args []string) {
 		objectiveOverride = flags.String("objective", "", "objective to use instead of studies' shared objective")
 		numEntries        = flags.Int("n", 10, "number of top trials to display")
 		valuesRe          = flags.String("values", "^$", "comma-separated list of anchored regular expression matching parameter values to display")
-		metricsRe         = flags.String("metrics", "^$", "comma-separated list of anchored regular expression matching additional metrics to display")
+		metricsRe         = flags.String("metrics", "^$", `comma-separated list of anchored regular expression matching additional metrics to display.
+Each regex can be prefixed with '+' or '-'. A regex with '+' (or '-'), when combined with -best, will pick the largest (or smallest) metric from each run.`)
+		best = flags.Bool("best", false,
+			"If set, pick the best metric from each run. Otherwise, pick the last metric reported.")
 	)
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, `usage: diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...
@@ -911,6 +915,22 @@ specifying regular expressions for matching them via the flags
 	if len(studies) == 0 {
 		log.Fatal("no studies matched")
 	}
+
+	parseObjective := func(spec string) (objective diviner.Objective) {
+		switch {
+		case strings.HasPrefix(spec, "-"):
+			objective.Direction = diviner.Minimize
+			objective.Metric = spec[1:]
+		case strings.HasPrefix(spec, "+"):
+			objective.Direction = diviner.Maximize
+			objective.Metric = spec[1:]
+		default:
+			objective.Direction = diviner.Maximize
+			objective.Metric = spec
+		}
+		return
+	}
+
 	objective := studies[0].Objective
 	if *objectiveOverride == "" {
 		for i := range studies {
@@ -920,60 +940,49 @@ specifying regular expressions for matching them via the flags
 			}
 		}
 	} else {
-		switch {
-		case strings.HasPrefix(*objectiveOverride, "-"):
-			objective.Direction = diviner.Minimize
-			objective.Metric = (*objectiveOverride)[1:]
-		case strings.HasPrefix(*objectiveOverride, "+"):
-			objective.Direction = diviner.Maximize
-			objective.Metric = (*objectiveOverride)[1:]
-		default:
-			log.Fatalf("invalid objective %s: must start with + or -", *objectiveOverride)
-		}
+		objective = parseObjective(*objectiveOverride)
 	}
-	studyRuns := make([][]diviner.Run, len(studies))
-	err := traverser.Each(len(studyRuns), func(i int) (err error) {
-		studyRuns[i], err = db.ListRuns(ctx, studies[i].Name, diviner.Success, time.Time{})
-		return
+	var (
+		runsMu sync.Mutex
+		runs   []diviner.Run
+	)
+	err := traverser.Each(len(studies), func(i int) error {
+		r, err := db.ListRuns(ctx, studies[i].Name, diviner.Success, time.Time{})
+		runsMu.Lock()
+		runs = append(runs, r...)
+		runsMu.Unlock()
+		return err
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	type trial struct {
-		diviner.Trial
-		Run diviner.Run
-	}
-
 	var (
 		n       int
-		trials  []trial
 		values  = make(map[string]bool)
 		metrics = make(map[string]bool)
 	)
-	for _, runs := range studyRuns {
-		for _, run := range runs {
-			trials = append(trials, trial{run.Trial(), run})
-		}
-	}
-	for _, trial := range trials {
-		if _, ok := trial.Metrics[objective.Metric]; !ok {
+
+	for _, run := range runs {
+		if _, ok := getMetric(run, objective, *best); !ok {
 			continue
 		}
-		trials[n] = trial
+		runs[n] = run
 		n++
-		for name := range trial.Metrics {
-			metrics[name] = true
+		for _, m := range run.Metrics {
+			for name := range m {
+				metrics[name] = true
+			}
 		}
-		for name := range trial.Values {
+		for name := range run.Values {
 			values[name] = true
 		}
 	}
-	if n < len(trials) {
-		log.Printf("skipping %d runs due to missing metrics", len(trials)-n)
+	if n < len(runs) {
+		log.Printf("skipping %d runs due to missing metrics", len(runs)-n)
 	}
-	sort.SliceStable(trials, func(i, j int) bool {
-		iv, jv := trials[i].Metrics[objective.Metric], trials[j].Metrics[objective.Metric]
+	sort.SliceStable(runs, func(i, j int) bool {
+		iv, _ := getMetric(runs[i], objective, *best)
+		jv, _ := getMetric(runs[j], objective, *best)
 		switch objective.Direction {
 		case diviner.Maximize:
 			return jv < iv
@@ -983,30 +992,54 @@ specifying regular expressions for matching them via the flags
 			panic(objective)
 		}
 	})
-	if *numEntries > 0 && len(trials) > *numEntries {
-		trials = trials[:*numEntries]
+	if *numEntries > 0 && len(runs) > *numEntries {
+		runs = runs[:*numEntries]
 	}
 	delete(metrics, objective.Metric)
+
+	var metricsOrdered []diviner.Objective
+	for _, m := range strings.Split(*metricsRe, ",") {
+		obj := parseObjective(m)
+		re, err := regexp.Compile(obj.Metric)
+		if err != nil {
+			log.Fatal(err)
+		}
+		i := len(metricsOrdered)
+		for k := range metrics {
+			if !re.MatchString(k) {
+				continue
+			}
+			metricsOrdered = append(metricsOrdered, diviner.Objective{obj.Direction, k})
+			delete(metrics, k)
+		}
+		// We sort the expansions, but retain the order of the list of matches.
+		sort.Slice(metricsOrdered[i:len(metricsOrdered)], func(i0, i1 int) bool {
+			return metricsOrdered[i0-i].Metric < metricsOrdered[i1-i].Metric
+		})
+	}
+
 	var (
-		metricsOrdered = matchAndSort(metrics, *metricsRe)
-		valuesOrdered  = matchAndSort(values, *valuesRe)
-		tw             tabwriter.Writer
+		valuesOrdered = matchAndSort(values, *valuesRe)
+		tw            tabwriter.Writer
 	)
 	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
 	fmt.Fprintf(&tw, "run\t%s", objective.Metric)
 	if len(metricsOrdered) > 0 {
-		fmt.Fprint(&tw, "\t"+strings.Join(metricsOrdered, "\t"))
+		for _, metric := range metricsOrdered {
+			fmt.Fprint(&tw, "\t"+metric.Metric)
+		}
 	}
 	if len(valuesOrdered) > 0 {
 		fmt.Fprint(&tw, "\t"+strings.Join(valuesOrdered, "\t"))
 	}
 	fmt.Fprintln(&tw)
-	for _, trial := range trials {
-		fmt.Fprintf(&tw, "%s:%d\t%.4g", trial.Run.Study, trial.Run.Seq, trial.Metrics[objective.Metric])
+	for _, run := range runs {
+		v, _ := getMetric(run, objective, *best)
+		fmt.Fprintf(&tw, "%s:%d\t%.4g", run.Study, run.Seq, v)
 		if len(metricsOrdered) > 0 {
 			metrics := make([]string, len(metricsOrdered))
-			for i, name := range metricsOrdered {
-				if v, ok := trial.Metrics[name]; ok {
+			for i, metric := range metricsOrdered {
+				if v, ok := getMetric(run, metric, *best); ok {
 					metrics[i] = fmt.Sprintf("%.3g", v)
 				} else {
 					metrics[i] = "NA"
@@ -1017,7 +1050,7 @@ specifying regular expressions for matching them via the flags
 		if len(valuesOrdered) > 0 {
 			values := make([]string, len(valuesOrdered))
 			for i, name := range valuesOrdered {
-				if v, ok := trial.Values[name]; ok {
+				if v, ok := run.Values[name]; ok {
 					switch v.Kind() {
 					default:
 						values[i] = fmt.Sprint(v)
@@ -1171,4 +1204,28 @@ func splitName(name string) (study string, seq uint64) {
 	default:
 		panic(parts)
 	}
+}
+
+func getMetric(run diviner.Run, objective diviner.Objective, best bool) (float64, bool) {
+	found := false
+	bestValue := 0.0
+	for i := len(run.Metrics) - 1; i >= 0; i-- {
+		m, ok := run.Metrics[i][objective.Metric]
+		if !ok {
+			continue
+		}
+		if !best {
+			return m, ok
+		}
+		switch {
+		case !found:
+			bestValue = m
+			found = true
+		case objective.Direction == diviner.Maximize && m > bestValue:
+			bestValue = m
+		case objective.Direction == diviner.Minimize && m < bestValue:
+			bestValue = m
+		}
+	}
+	return bestValue, found
 }

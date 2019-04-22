@@ -13,3 +13,5 @@ dummy_study(name=command(interpreter="python3 -c", script="""
 import math
 print(math.sqrt(2))
 """))
+file = temp_file("hello world")
+dummy_study(name=command(script='cat {}'.format(file)))

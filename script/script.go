@@ -104,6 +104,10 @@
 // 	For example, command("print('foo'*2)", interpreter="python3 -c") will produce
 //	"foofoo\n".
 //
+//	temp_file(contents)
+//		Create a temporary file from the provided contents (a string), and return
+//		its path.
+//
 //	enum_value(str)
 //		Internal representation of a protocol buffer enumeration value.
 //		(See to_proto).
@@ -124,6 +128,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -160,6 +166,7 @@ var builtins = starlark.StringDict{
 	"localsystem": starlark.NewBuiltin("localsystem", makeLocalSystem),
 	"ec2system":   starlark.NewBuiltin("ec2system", makeEC2System),
 	"command":     starlark.NewBuiltin("command", makeCommand),
+	"temp_file":   starlark.NewBuiltin("temp_file", makeTempFile),
 	"enum_value":  starlark.NewBuiltin("enum_value", makeEnumValue),
 	"to_proto":    starlark.NewBuiltin("to_proto", makeToProto),
 }
@@ -573,6 +580,29 @@ func makeCommand(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		return nil, err
 	}
 	return starlark.String(outbuf.Bytes()), nil
+}
+
+func makeTempFile(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var contents string
+	err := starlark.UnpackArgs(
+		"temp_file", args, kwargs,
+		"contents", &contents,
+	)
+	if err != nil {
+		return nil, err
+	}
+	f, err := ioutil.TempFile("", "")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.WriteString(f, contents); err != nil {
+		return nil, err
+	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+	return starlark.String(name), nil
 }
 
 type enumValue string

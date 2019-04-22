@@ -115,7 +115,7 @@ func TestCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(studies), 3; got != want {
+	if got, want := len(studies), 4; got != want {
 		t.Errorf("got %v, want %v", got, want)
 	}
 	if got, want := studies[0].Name, "foo"; got != want {
@@ -125,6 +125,9 @@ func TestCommand(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 	if got, want := studies[2].Name, "1.4142135623730951"; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := studies[3].Name, "hello world"; got != want {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }

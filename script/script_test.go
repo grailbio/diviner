@@ -85,6 +85,31 @@ func TestScriptIdent(t *testing.T) {
 	}
 }
 
+func TestProto(t *testing.T) {
+	studies, err := script.Load("testdata/proto.dv", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(studies), 1; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	study := studies[0]
+	config, err := study.Run(nil, "test1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := config.Script, `float_value: 123.123
+int_value: 123
+str_value: "hello world"
+list_value: 1
+list_value: 2
+list_value: 3
+enum_value: HELLO
+`; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestCommand(t *testing.T) {
 	studies, err := script.Load("testdata/commands.dv", nil)
 	if err != nil {

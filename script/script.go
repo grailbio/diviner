@@ -96,13 +96,22 @@
 //		                    one of "sampling", "lgbfs" (by default it is automatically
 //		                    selected).
 //
-//  command(script, interpreter?="bash -c")
-//    Run a subprocess and return its standard output as a string.
-//    - script: the script to run; a string.
-//    - interpreter: command that runs the script. It defaults to "bash -c".
+//  	command(script, interpreter?="bash -c")
+//		Run a subprocess and return its standard output as a string.
+//		- script: the script to run; a string.
+//		- interpreter: command that runs the script. It defaults to "bash -c".
 //
-//    For example, command("print('foo'*2)", interpreter="python3 -c") will produce
-//    "foofoo\n".
+// 	For example, command("print('foo'*2)", interpreter="python3 -c") will produce
+//	"foofoo\n".
+//
+//	enum_value(str)
+//		Internal representation of a protocol buffer enumeration value.
+//		(See to_proto).
+//
+//	to_proto(dict):
+//		Render a string-keyed dictionary to the text protocol buffer format.
+//		Dictionaries cannot currently be nested. Enumeration values as created
+//		by enum_value are rendered as protocol buffer enumeration, not strings.
 //
 // Diviner configs must include one or more studies as toplevel declarations.
 // Global starlark objects are frozen after initial evaluation to prevent functions
@@ -151,6 +160,8 @@ var builtins = starlark.StringDict{
 	"localsystem": starlark.NewBuiltin("localsystem", makeLocalSystem),
 	"ec2system":   starlark.NewBuiltin("ec2system", makeEC2System),
 	"command":     starlark.NewBuiltin("command", makeCommand),
+	"enum_value":  starlark.NewBuiltin("enum_value", makeEnumValue),
+	"to_proto":    starlark.NewBuiltin("to_proto", makeToProto),
 }
 
 func makeLoader(entrypoint string) func(thread *starlark.Thread, module string) (starlark.StringDict, error) {
@@ -562,4 +573,59 @@ func makeCommand(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		return nil, err
 	}
 	return starlark.String(outbuf.Bytes()), nil
+}
+
+type enumValue string
+
+func makeEnumValue(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var str string
+	err := starlark.UnpackArgs(
+		"enum", args, kwargs,
+		"value", &str,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return enumValue(str), nil
+}
+
+func (v enumValue) String() string     { return string(v) }
+func (v enumValue) Type() string       { return "proto_enum" }
+func (enumValue) Freeze()              {}
+func (enumValue) Truth() starlark.Bool { return true }
+func (v enumValue) Hash() (uint32, error) {
+	return starlark.String(v).Hash()
+}
+
+func makeToProto(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var (
+		dict  = new(starlark.Dict)
+		enums []string
+	)
+	err := starlark.UnpackArgs(
+		"to_proto", args, kwargs,
+		"dict", &dict,
+		"enums?", &enums,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var buf strings.Builder
+	for _, kv := range dict.Items() {
+		keyValue, ok := kv[0].(starlark.String)
+		if !ok {
+			return nil, fmt.Errorf("invalid key %s: keys must be string typed, not %s", kv[0].String(), kv[0].Type())
+		}
+		key := string(keyValue)
+		switch val := kv[1].(type) {
+		case *starlark.List:
+			for i := 0; i < val.Len(); i++ {
+				fmt.Fprintf(&buf, "%s: %v\n", key, val.Index(i))
+
+			}
+		default:
+			fmt.Fprintf(&buf, "%s: %v\n", key, val)
+		}
+	}
+	return starlark.String(buf.String()), nil
 }

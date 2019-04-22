@@ -1,0 +1,16 @@
+
+config = {
+  "float_value": 123.123,
+  "int_value": 123,
+  "str_value": "hello world",
+  "list_value": [1, 2, 3],
+  "enum_value": enum_value("HELLO"),
+}
+
+
+study(
+    name="to_proto",
+    objective=minimize("dummy"),
+    params={"dummy": discrete("dummy")},
+    run=lambda vs: run_config(system=localsystem("local", 1), script=to_proto(config)),
+)

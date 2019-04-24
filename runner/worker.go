@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/grailbio/base/log"
@@ -126,10 +125,7 @@ func (w *worker) Start(ctx context.Context) {
 			break
 		}
 		sess.release()
-		// HACK: this should be propagated as a semantic error annotation.
-		if !strings.Contains(err.Error(), "InstanceLimitExceeded") {
-			log.Error.Printf("failed to allocate machine: %v", err)
-		}
+		log.Error.Printf("failed to allocate machine: %v", err)
 		if err := retry.Wait(ctx, machineRetry, try); err != nil {
 			w.err = err
 			return

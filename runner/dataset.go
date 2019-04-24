@@ -62,6 +62,11 @@ func (d *dataset) Do(ctx context.Context, runner *Runner) {
 	}
 	defer w.Return()
 	d.setStatus(statusRunning)
+	// First clean up the workspace.
+	if err := w.Reset(ctx); err != nil {
+		d.error(err)
+		return
+	}
 	if err := w.CopyFiles(ctx, d.LocalFiles); err != nil {
 		d.error(errors.E(fmt.Sprintf("dataset copyfiles %+v: %v", d.LocalFiles, err)))
 		return

@@ -83,7 +83,17 @@ type Skopt struct {
 // using the provided objective. This model is then used to select
 // the next set of points by optimizing the configured acquisition
 // function.
-func (s *Skopt) Next(trials []diviner.Trial, params diviner.Params, objective diviner.Objective, n int) ([]diviner.Values, error) {
+func (s *Skopt) Next(inputTrials []diviner.Trial, params diviner.Params, objective diviner.Objective, n int) ([]diviner.Values, error) {
+	// Filter out pending trails, which may have incomplete metrics.
+	// This can yield multiple trials concurrent runs for the same set
+	// of hyperparameters if the search space is small; but then you
+	// probalby shouldn't be using this oracle anyway.
+	trials := make([]diviner.Trial, 0, len(inputTrials))
+	for _, trial := range inputTrials {
+		if !trial.Pending {
+			trials = append(trials, trial)
+		}
+	}
 	// First construct skopt spaces from diviner params.
 	sortedParams := params.Sorted()
 	skoptParams := make([]string, len(sortedParams))

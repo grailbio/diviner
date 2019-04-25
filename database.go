@@ -87,7 +87,7 @@ type Run struct {
 // TODO(marius): allow other metric selection policies
 // (e.g., minimize train and test loss difference)
 func (r Run) Trial() Trial {
-	trial := Trial{Values: r.Values}
+	trial := Trial{Values: r.Values, Pending: r.State != Success}
 	if len(r.Metrics) > 0 {
 		trial.Metrics = r.Metrics[len(r.Metrics)-1]
 	}

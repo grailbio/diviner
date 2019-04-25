@@ -101,6 +101,9 @@ type Trial struct {
 	// Metrics is the metrics produced by the black box during
 	// the run.
 	Metrics Metrics
+	// Pending indicates whether this is a pending trial. Pending trials
+	// may have incomplete or non-final metrics.
+	Pending bool
 }
 
 // Equal reports whether the two trials are equal.

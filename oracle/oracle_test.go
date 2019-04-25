@@ -29,7 +29,7 @@ func testOracle(t *testing.T, o diviner.Oracle, dir diviner.Direction, x float64
 			t.Fatal(err)
 		}
 		for _, v := range values {
-			trials = append(trials, diviner.Trial{v, diviner.Metrics{"y": fn(v["x"].Float())}})
+			trials = append(trials, diviner.Trial{v, diviner.Metrics{"y": fn(v["x"].Float())}, false})
 		}
 	}
 	// Find the best value. It should be close to approx.

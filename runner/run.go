@@ -8,17 +8,22 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/diviner"
 )
 
-var metricsPrefix = []byte("METRICS: ")
+var (
+	metricsPrefix = []byte("METRICS: ")
+	divinerPrefix = []byte("DIVINER: ")
+)
 
 const timeLayout = "20060102.150405"
 
@@ -33,6 +38,8 @@ const (
 	statusRunning
 	// StatusOk indicates that the run completed successfully.
 	statusOk
+	// StatusTimedout indicates that the run timed out of its own keepalive.
+	statusTimeout
 	// StatusErr indicates that the run failed.
 	statusErr
 )
@@ -52,6 +59,8 @@ func (s status) String() string {
 		return "running"
 	case statusOk:
 		return "ok"
+	case statusTimeout:
+		return "timeout"
 	case statusErr:
 		return "error"
 	default:
@@ -73,6 +82,8 @@ type run struct {
 
 	// Config is the run config for this trial.
 	Config diviner.RunConfig
+
+	count int
 
 	mu            sync.Mutex
 	status        status
@@ -114,7 +125,21 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 		r.error(err)
 		return
 	}
-	defer w.Return()
+	ctx, cancel := context.WithCancel(ctx)
+	var canceled int64
+	alarm := newAlarm(func() {
+		atomic.StoreInt64(&canceled, 1)
+		cancel()
+	})
+	go alarm.Do(ctx)
+
+	defer func() {
+		if atomic.LoadInt64(&canceled) == 1 {
+			w.err = errors.New("worker task timed out")
+			r.setStatus(statusTimeout, "task timed out from its own keepalive")
+		}
+		w.Return()
+	}()
 
 	r.setStatus(statusRunning, "")
 	if err := w.Reset(ctx); err != nil {
@@ -128,7 +153,12 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 	r.mu.Lock()
 	r.start = time.Now()
 	r.mu.Unlock()
-	out, err := w.Run(ctx, r.Config.Script, nil)
+
+	// This is to enable unit-testing of the keeaplive/retry mechanism.
+	env := []string{fmt.Sprintf("DIVINER_TEST_COUNT=%d", r.count)}
+	r.count++
+
+	out, err := w.Run(ctx, r.Config.Script, env)
 	if err != nil {
 		r.errorf("failed to start script: %s", err)
 		return
@@ -156,12 +186,22 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 			line := string(line)
 			metrics, err := parseMetrics(strings.TrimPrefix(line, "METRICS: "))
 			if err != nil {
-				log.Error.Printf("error parsing metrics from run %s: %v", r, err)
+				log.Error.Printf("%s:%d: error parsing metrics: %v", r.Run.Study, r.Run.Seq, err)
 			} else {
 				r.report(metrics)
 				if err := runner.db.AppendRunMetrics(ctx, r.Run.Study, r.Run.Seq, metrics); err != nil {
-					log.Error.Printf("failed to report metrics to DB: %v", err)
+					log.Error.Printf("%s:%d: failed to report metrics to DB: %v", r.Run.Study, r.Run.Seq, err)
 				}
+			}
+		} else if bytes.HasPrefix(line, divinerPrefix) {
+			line := string(bytes.TrimPrefix(line, divinerPrefix))
+			if !strings.HasPrefix(line, "keepalive=") {
+				log.Error.Printf("unknown diviner directive %s", line)
+			} else if dur, err := time.ParseDuration(strings.TrimPrefix(line, "keepalive=")); err != nil {
+				log.Error.Printf("%s:%d: error parsing directive %s: %v", r.Run.Study, r.Run.Seq, line, err)
+			} else {
+				log.Printf("%s:%d: keepalive: %s", r.Run.Study, r.Run.Seq, dur)
+				alarm.Reset(dur)
 			}
 		} else {
 			progress := len(line) > 0 && line[len(line)-1] == '\r'
@@ -251,6 +291,51 @@ func (r *run) Status() (status, string, time.Duration) {
 		elapsed = time.Since(r.start)
 	}
 	return r.status, r.statusMessage, elapsed
+}
+
+// An alarm keeps track of a a keepalive timeout, calling a
+// cancelation function if the alarm is not reset before expiring.
+type alarm struct {
+	cancel func()
+	c      chan time.Duration
+}
+
+// newAlarm returns an alarm that calls the provided function
+// if it is not reset.
+func newAlarm(cancel func()) *alarm {
+	return &alarm{
+		cancel: cancel,
+		c:      make(chan time.Duration, 1),
+	}
+}
+
+// Reset resets the alarm. The alarm's cancel function will
+// be called after the provided duration unless the alarm is
+// reset again. A duration of zero indicates that the alarm
+// should be deactivated.
+func (a *alarm) Reset(dur time.Duration) {
+	a.c <- dur
+}
+
+// Do starts the alarm's supervisor loop. It returns when the
+// provided context is canceled.
+func (a *alarm) Do(ctx context.Context) {
+	var done <-chan time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case dur := <-a.c:
+			if dur == 0 {
+				done = nil
+			} else {
+				done = time.After(dur)
+			}
+		case <-done:
+			a.cancel()
+			done = nil
+		}
+	}
 }
 
 // ScanProgress scans lines of output from a trial script, anticipating

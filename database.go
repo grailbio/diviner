@@ -74,6 +74,9 @@ type Run struct {
 	// Runtime is the runtime duration of the run.
 	Runtime time.Duration
 
+	// Number of times the run was retried.
+	Retries int
+
 	// Metrics is the history of metrics, in the order reported by the
 	// run.
 	//
@@ -119,11 +122,12 @@ type Database interface {
 	// and creation time.
 	InsertRun(ctx context.Context, run Run) (Run, error)
 	// UpdateRun updates the run named by the provided study and
-	// sequence number with the given run state, message, and runtime.
+	// sequence number with the given run state, message, runtime, and
+	// current retry sequence.
 	// UpdateRun is used also as a keepalive mechanism: runners must
 	// call UpdateRun frequently in order to have the run considered
 	// live by Diviner's tooling.
-	UpdateRun(ctx context.Context, study string, seq uint64, state RunState, message string, runtime time.Duration) error
+	UpdateRun(ctx context.Context, study string, seq uint64, state RunState, message string, runtime time.Duration, retry int) error
 	// AppendRunMetrics reports a new set of metrics to the run named by the provided
 	// study and sequence number.
 	AppendRunMetrics(ctx context.Context, study string, seq uint64, metrics Metrics) error

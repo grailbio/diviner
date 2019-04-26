@@ -276,8 +276,9 @@ func (c *commandService) Run(ctx context.Context, command cmd, reply *io.ReadClo
 	eg := errgroup.Group{}
 	eg.Go(func() error {
 		defer tty.Close()
-		cmd := exec.Command(command.Args[0], command.Args[1:]...)
+		cmd := exec.CommandContext(ctx, command.Args[0], command.Args[1:]...)
 		cmd.Env = append(os.Environ(), command.Env...)
+		cmd.Env = append(cmd.Env, "DIVINER=1")
 		cmd.Stdout = tty
 		cmd.Stderr = tty
 		cmd.Dir = c.dir

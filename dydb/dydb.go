@@ -237,7 +237,7 @@ func (d *DB) InsertRun(ctx context.Context, run diviner.Run) (diviner.Run, error
 
 // UpdateRun updates the state, message, and runtime of the run named by the provided
 // study and sequence number.
-func (d *DB) UpdateRun(ctx context.Context, study string, seq uint64, state diviner.RunState, message string, runtime time.Duration) error {
+func (d *DB) UpdateRun(ctx context.Context, study string, seq uint64, state diviner.RunState, message string, runtime time.Duration, retry int) error {
 	if message == "" {
 		// The dynamoDB API does not allow for empty string values.
 		message = "(none)"
@@ -246,15 +246,16 @@ func (d *DB) UpdateRun(ctx context.Context, study string, seq uint64, state divi
 	input := &dynamodb.UpdateItemInput{
 		TableName:        aws.String(d.table),
 		Key:              key(study, seq),
-		UpdateExpression: aws.String(`SET #status = :status, #state = :state, #runtime = :runtime, #keepalive = :timestamp, #date = :date`),
+		UpdateExpression: aws.String(`SET #status = :status, #state = :state, #runtime = :runtime, #retry = :retry, #keepalive = :timestamp, #date = :date`),
 		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
 			":status":    {S: aws.String(message)},
 			":state":     {S: aws.String(state.String())},
 			":runtime":   {S: aws.String(runtime.String())},
+			":retry":     {N: aws.String(fmt.Sprint(retry))},
 			":timestamp": {S: aws.String(now.UTC().Format(timeLayout))},
 			":date":      {S: aws.String(now.UTC().Format(dateLayout))},
 		},
-		ExpressionAttributeNames: appendAttributeNames(nil, "status", "state", "runtime", "keepalive", "date"),
+		ExpressionAttributeNames: appendAttributeNames(nil, "status", "state", "runtime", "retry", "keepalive", "date"),
 	}
 	_, err := d.db.UpdateItemWithContext(ctx, input)
 	debug("dynamodb.UpdateItem", input, nil, err)
@@ -526,6 +527,7 @@ type dynamodbRun struct {
 	Created   string            `dynamoattr:"timestamp"`
 	Runtime   string            `dynamoattr:"runtime"`
 	Keepalive string            `dynamoattr:"keepalive"`
+	Retries   int               `dynamoattr:"retries"`
 	Date      string            `dynamoattr:"date"`
 	Config    []byte            `dynamoattr:"config"`
 }
@@ -548,6 +550,7 @@ func marshal(run diviner.Run) (map[string]*dynamodb.AttributeValue, error) {
 	dyrun.Created = run.Created.UTC().Format(timeLayout)
 	dyrun.Runtime = run.Runtime.String()
 	dyrun.Keepalive = run.Updated.UTC().Format(timeLayout)
+	dyrun.Retries = run.Retries
 	dyrun.Date = run.Updated.UTC().Format(dateLayout)
 	b = new(bytes.Buffer)
 	if err := gob.NewEncoder(b).Encode(run.Config); err != nil {
@@ -596,6 +599,7 @@ func unmarshal(attrs map[string]*dynamodb.AttributeValue) (diviner.Run, error) {
 	} else if run.State == diviner.Pending {
 		run.Runtime = time.Since(run.Created)
 	}
+	run.Retries = dyrun.Retries
 
 	if err := gob.NewDecoder(bytes.NewReader(dyrun.Config)).Decode(&run.Config); err != nil {
 		return diviner.Run{}, errors.E("decode config", err)

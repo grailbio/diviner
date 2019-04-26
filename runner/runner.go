@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"text/tabwriter"
 	"time"
 
@@ -31,6 +32,9 @@ const (
 	idleTime = 5 * time.Minute
 
 	keepaliveInterval = 15 * time.Second
+
+	// Maximum number of times to retry a timed out task.
+	maxRetries = 5
 )
 
 // A Runner is responsible for creating a cluster of machines and running
@@ -266,9 +270,8 @@ outer:
 			go w.Start(ctx)
 		case w := <-workerc:
 			if err := w.Err(); err != nil {
-				// TODO(marius): allocate a new worker to replace this one.
 				if w.Session != nil {
-					panic(fmt.Sprintf("nonnil session, %v %v", w, w.Err()))
+					w.Session.release()
 				}
 				nworker--
 				log.Error.Printf("worker %s error: %v", w, err)
@@ -333,6 +336,7 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 	defer r.remove(run)
 	var wg sync.WaitGroup
 	wg.Add(1)
+	var retries int64
 	go func() {
 		tick := time.NewTicker(keepaliveInterval)
 		defer tick.Stop()
@@ -344,28 +348,35 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 				return
 			}
 			status, message, elapsed := run.Status()
-			if err := r.db.UpdateRun(ctx, study.Name, run.Run.Seq, diviner.Pending, fmt.Sprintf("%s: %s", status, message), elapsed); err != nil && err != context.Canceled {
+			retry := int(atomic.LoadInt64(&retries))
+			if err := r.db.UpdateRun(ctx, study.Name, run.Run.Seq, diviner.Pending, fmt.Sprintf("%s: %s", status, message), elapsed, retry); err != nil && err != context.Canceled {
 				log.Error.Printf("run %s:%d: error setting status: %v", run.Run.Study, run.Run.Seq, message)
 			}
 		}
 	}()
-	run.Do(ctx, r)
-	status, message, elapsed := run.Status()
-	log.Printf("run %s: %s %s %s", run, status, message, elapsed)
 	state := diviner.Failure
-	switch status {
-	case statusWaiting, statusRunning:
-		log.Error.Printf("run %s returned with incomplete status %s", run, status)
-	case statusOk:
-		state = diviner.Success
-	case statusErr:
-		log.Error.Printf("run %s error: %v", run, message)
+loop:
+	for ; retries < maxRetries; atomic.AddInt64(&retries, 1) {
+		run.Do(ctx, r)
+		status, message, elapsed := run.Status()
+		log.Printf("run %s: %s %s %s", run, status, message, elapsed)
+		switch status {
+		case statusWaiting, statusRunning:
+			log.Error.Printf("run %s returned with incomplete status %s", run, status)
+		case statusOk:
+			state = diviner.Success
+		case statusTimeout:
+			continue loop
+		case statusErr:
+			log.Error.Printf("run %s error: %v", run, message)
+		}
+		break
 	}
 	cancel()
 	ctx = pctx
 	wg.Wait()
-	status, message, elapsed = run.Status()
-	if err := r.db.UpdateRun(ctx, study.Name, run.Run.Seq, state, "", elapsed); err != nil {
+	_, message, elapsed := run.Status()
+	if err := r.db.UpdateRun(ctx, study.Name, run.Run.Seq, state, "", elapsed, int(retries)); err != nil {
 		log.Error.Printf("run %s:%d: error setting status: %v", run.Run.Study, run.Run.Seq, message)
 		return diviner.Run{}, err
 	}

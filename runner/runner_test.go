@@ -42,13 +42,10 @@ func init() {
 }
 
 func TestRunner(t *testing.T) {
-	dir, cleanup := runnerTest(t)
+	dir, db, cleanup := runnerTest(t)
 	defer cleanup()
+	ctx := context.Background()
 
-	db, err := localdb.Open(filepath.Join(dir, "test.ddb"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	test := testsystem.New()
 	systems := []*diviner.System{
 		&diviner.System{ID: "error", System: &errorSystem{testsystem.New()}},
@@ -87,19 +84,7 @@ func TestRunner(t *testing.T) {
 		Objective: diviner.Objective{diviner.Maximize, "acc"},
 		Oracle:    &oracle.GridSearch{},
 	}
-	r := runner.New(db)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		if err := r.Loop(ctx); err != context.Canceled {
-			t.Fatal(err)
-		}
-	}()
-	done, err := r.Round(ctx, study, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !done {
+	if done := testRun(t, db, study); !done {
 		t.Fatal("not done")
 	}
 	runs, err := db.ListRuns(ctx, study.Name, diviner.Success, time.Time{})
@@ -123,7 +108,6 @@ func TestRunner(t *testing.T) {
 	if got, want := trials, expect; !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	cancel()
 	// Make sure the machines are stopped.
 	for _, m := range test.B().Machines() {
 		if !eventually(func() bool { return m.Err() != nil }) {
@@ -133,10 +117,10 @@ func TestRunner(t *testing.T) {
 }
 
 func TestRunnerError(t *testing.T) {
-	dir, cleanup := runnerTest(t)
+	_, db, cleanup := runnerTest(t)
 	defer cleanup()
+	ctx := context.Background()
 
-	db, err := localdb.Open(filepath.Join(dir, "test.ddb"))
 	test := testsystem.New()
 	systems := []*diviner.System{&diviner.System{ID: "test", System: test}}
 	dataset := diviner.Dataset{
@@ -164,22 +148,10 @@ func TestRunnerError(t *testing.T) {
 		Objective: diviner.Objective{diviner.Maximize, "acc"},
 		Oracle:    &oracle.GridSearch{},
 	}
+	if done := testRun(t, db, study); done {
+		t.Fatal("should not be done")
+	}
 
-	r := runner.New(db)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		if err := r.Loop(ctx); err != context.Canceled {
-			t.Fatal(err)
-		}
-	}()
-	done, err := r.Round(ctx, study, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if done {
-		t.Error("should not be done")
-	}
 	runs, err := db.ListRuns(ctx, study.Name, diviner.Success, time.Time{})
 	if err != nil {
 		t.Fatal(err)
@@ -212,8 +184,116 @@ the_status
 	}
 }
 
-func runnerTest(t *testing.T) (dir string, cleanup func()) {
-	return testutil.TempDir(t, "", "")
+func TestKeepalive(t *testing.T) {
+	_, db, cleanup := runnerTest(t)
+	defer cleanup()
+
+	r := runner.New(db)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		if err := r.Loop(ctx); err != context.Canceled {
+			t.Fatal(err)
+		}
+	}()
+
+	testScript(t, db, 5, diviner.Failure, `
+echo 'DIVINER: keepalive=1ms'
+sleep 1
+`)
+
+	testScript(t, db, 2, diviner.Success, `
+if [ $DIVINER_TEST_COUNT -lt 2 ]
+then
+	echo 'DIVINER: keepalive=1ms'
+	sleep 1
+else
+	sleep 1
+fi
+`)
+
+	testScript(t, db, 0, diviner.Success, `
+echo 'DIVINER: keepalive=2s'
+sleep 1
+echo 'DIVINER: keepalive=3s'
+sleep 2
+`)
+
+	// Regular failures should not be retried.
+	testScript(t, db, 0, diviner.Failure, `exit 1`)
+}
+
+func runnerTest(t *testing.T) (dir string, database diviner.Database, cleanup func()) {
+	t.Helper()
+	dir, cleanup = testutil.TempDir(t, "", "")
+	var err error
+	database, err = localdb.Open(filepath.Join(dir, "test.ddb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir, database, cleanup
+}
+
+func testScript(t *testing.T, db diviner.Database, retries int, state diviner.RunState, script string) {
+	t.Helper()
+	r := runner.New(db)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		if err := r.Loop(ctx); err != context.Canceled {
+			t.Fatal(err)
+		}
+	}()
+	study := testStudy(script)
+	run, err := r.Run(ctx, study, nil)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := run.Retries, retries; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := run.State, state; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	return
+}
+
+func testStudy(script string) diviner.Study {
+	test := testsystem.New()
+	systems := []*diviner.System{&diviner.System{ID: "test", System: test}}
+	return diviner.Study{
+		Name: "test",
+		Params: diviner.Params{
+			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1)),
+		},
+		Run: func(values diviner.Values, id string) (diviner.RunConfig, error) {
+			config := diviner.RunConfig{
+				Systems: systems,
+				Script:  script,
+			}
+			return config, nil
+		},
+		Objective: diviner.Objective{diviner.Maximize, "acc"},
+		Oracle:    &oracle.GridSearch{},
+	}
+}
+
+func testRun(t *testing.T, db diviner.Database, study diviner.Study) (done bool) {
+	t.Helper()
+	r := runner.New(db)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		if err := r.Loop(ctx); err != context.Canceled {
+			t.Fatal(err)
+		}
+	}()
+	var err error
+	done, err = r.Round(ctx, study, 0)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return
 }
 
 var policy = retry.Backoff(time.Second, 5*time.Second, 1.5)

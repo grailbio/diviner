@@ -166,7 +166,7 @@ func (d *DB) InsertRun(ctx context.Context, run diviner.Run) (diviner.Run, error
 	return run, err
 }
 
-func (d *DB) UpdateRun(ctx context.Context, study string, seq uint64, state diviner.RunState, message string, runtime time.Duration) error {
+func (d *DB) UpdateRun(ctx context.Context, study string, seq uint64, state diviner.RunState, message string, runtime time.Duration, retry int) error {
 	return d.db.Update(func(tx *bolt.Tx) (e error) {
 		b := lookup(tx, runKey{study, seq})
 		if b == nil {
@@ -181,6 +181,7 @@ func (d *DB) UpdateRun(ctx context.Context, study string, seq uint64, state divi
 		run.State = state
 		run.Status = message
 		run.Runtime = runtime
+		run.Retries = retry
 		err = put(b, metaKey, run)
 		// Update the study time as well, so that it shows up properly in listings.
 		if err := put(lookup(tx, studiesKey, run.Study), updatedKey, time.Now()); err != nil {

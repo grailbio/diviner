@@ -468,6 +468,9 @@ the given study names.`)
 		now           = time.Now()
 	)
 	for i, study := range studies {
+		sort.Slice(runs[i], func(j, k int) bool {
+			return runs[i][j].Seq < runs[i][k].Seq
+		})
 		for _, run := range runs[i] {
 			var layout = time.Kitchen
 			switch dur := now.Sub(run.Created); {
@@ -1110,6 +1113,9 @@ func databaseGetter(db diviner.Database, since time.Time) func(context.Context, 
 		if err != nil {
 			log.Fatal(err)
 		}
+		sort.Slice(studies, func(i, j int) bool {
+			return studies[i].Name < studies[j].Name
+		})
 		return studies
 	}
 }

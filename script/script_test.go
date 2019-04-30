@@ -67,6 +67,36 @@ func TestScript(t *testing.T) {
 	}
 }
 
+func TestParams(t *testing.T) {
+	studies, err := script.Load("testdata/params.dv", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(studies), 1; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	params := studies[0].Params
+	if got, want := len(params), 3; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for _, key := range []string{"learning_rate", "dropout", "list"} {
+		_, ok := params[key]
+		if !ok {
+			t.Fatalf("params did not have key %s", key)
+		}
+	}
+	lists := params["list"].Values()
+	if got, want := len(lists), 2; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if got, want := lists[0], (&diviner.List{diviner.Int(1), diviner.Int(2)}); !dequal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := lists[1], (&diviner.List{diviner.String("ok"), diviner.Int(1), diviner.Float(0.1)}); !dequal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestScriptIdent(t *testing.T) {
 	studies, err := script.Load("testdata/ident.dv", nil)
 	if err != nil {
@@ -153,4 +183,8 @@ func TestLoadCycle(t *testing.T) {
 	if !strings.Contains(err.Error(), "cycle in load graph involving module testdata/cycle.dv") {
 		t.Fatal(err)
 	}
+}
+
+func dequal(v, w diviner.Value) bool {
+	return !v.Less(w) && !w.Less(v)
 }

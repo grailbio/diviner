@@ -21,3 +21,14 @@ func TestValue(t *testing.T) {
 		t.Error("strings not comparable")
 	}
 }
+
+func TestList(t *testing.T) {
+	l1 := &diviner.List{diviner.Int(10), diviner.Int(20)}
+	l2 := &diviner.List{diviner.Int(5), diviner.Int(20)}
+	if l1.Less(l1) {
+		t.Error("l1.Less(l1)")
+	}
+	if !l2.Less(l1) {
+		t.Error("expected l2.Less(l1)")
+	}
+}

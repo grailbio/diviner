@@ -15,6 +15,7 @@ func init() {
 	gob.Register(Float(0))
 	gob.Register(Int(0))
 	gob.Register(String(""))
+	gob.Register(&List{})
 }
 
 // Kind represents the kind of a value.
@@ -24,6 +25,7 @@ const (
 	Integer Kind = iota
 	Real
 	Str
+	Seq
 )
 
 func (k Kind) String() string {
@@ -34,6 +36,8 @@ func (k Kind) String() string {
 		return "real"
 	case Str:
 		return "string"
+	case Seq:
+		return "seq"
 	default:
 		panic(k)
 	}
@@ -60,6 +64,12 @@ type Value interface {
 
 	// Str returns the string of string-typed values.
 	Str() string
+
+	// Len returns the length of a sequence value.
+	Len() int
+
+	// Index returns the value at an index of a sequence.
+	Index(i int) Value
 }
 
 // Int is an integer-typed value.
@@ -85,6 +95,9 @@ func (Int) Str() string { panic("Str on Int") }
 // Int implements Value.
 func (v Int) Int() int64 { return int64(v) }
 
+func (Int) Len() int        { panic("Len on Int") }
+func (Int) Index(int) Value { panic("Index on Int") }
+
 // Float is a float-typed value.
 type Float float64
 
@@ -108,6 +121,9 @@ func (Float) Str() string { panic("Str on Float") }
 // Int implements Value.
 func (Float) Int() int64 { panic("Int on Float") }
 
+func (Float) Len() int        { panic("Len on Float") }
+func (Float) Index(int) Value { panic("Index on Float") }
+
 // String is a string-typed value.
 type String string
 
@@ -130,6 +146,54 @@ func (String) Int() int64 { panic("Int on String") }
 
 // Str implements Value.
 func (v String) Str() string { return string(v) }
+
+func (String) Len() int        { panic("Len on String") }
+func (String) Index(int) Value { panic("Index on String") }
+
+// *List is a list-typed value.
+type List []Value
+
+// Less implements Value.
+func (l *List) Less(m Value) bool {
+	for i := 0; i < l.Len(); i++ {
+		if m.Len() <= i {
+			break
+		}
+		if l.Index(i).Less(m.Index(i)) {
+			return true
+		} else if m.Index(i).Less(l.Index(i)) {
+			return false
+		}
+	}
+	return false
+}
+
+// String implements Value.
+func (l *List) String() string {
+	elems := make([]string, l.Len())
+	for i := range elems {
+		elems[i] = l.Index(i).String()
+	}
+	return "[" + strings.Join(elems, ", ") + "]"
+}
+
+// Kind implements Value.
+func (*List) Kind() Kind { return Seq }
+
+// Float implements Value.
+func (*List) Float() float64 { panic("Float on List") }
+
+// Int implements Value.
+func (*List) Int() int64 { panic("Int on List") }
+
+// Str implements Value.
+func (*List) Str() string { panic("Str on List") }
+
+// Len returns the length of the list.
+func (l *List) Len() int { return len(*l) }
+
+// Index returns the ith element of the list.
+func (l *List) Index(i int) Value { return (*l)[i] }
 
 // A NamedValue is a value that is assigned a name.
 type NamedValue struct {

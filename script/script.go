@@ -253,19 +253,9 @@ func makeDiscrete(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tu
 	}
 	vals := make([]diviner.Value, len(args))
 	for i, arg := range args {
-		switch val := arg.(type) {
-		case starlark.String:
-			vals[i] = diviner.String(val.GoString())
-		case starlark.Float:
-			vals[i] = diviner.Float(float64(val))
-		case starlark.Int:
-			v64, ok := val.Int64()
-			if !ok {
-				return nil, fmt.Errorf("argument %s (%s) is not a valid diviner value", val, val.Type())
-			}
-			vals[i] = diviner.Int(v64)
-		default:
-			return nil, fmt.Errorf("argument %s (%s) is not a supported diviner value", val, val.Type())
+		vals[i] = starlark2diviner(arg)
+		if vals[i] == nil {
+			return nil, fmt.Errorf("argument %s (%s) is not a valid diviner value", arg, arg.Type())
 		}
 	}
 	return diviner.NewDiscrete(vals...), nil
@@ -352,17 +342,9 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 	study.Run = func(vals diviner.Values, runID string) (diviner.RunConfig, error) {
 		var input starlark.Dict
 		for key, value := range vals {
-			var val starlark.Value
-			switch value.(type) {
-			case diviner.Float, *diviner.Float:
-				val = starlark.Float(value.Float())
-			case diviner.Int, *diviner.Int:
-				val = starlark.MakeInt64(value.Int())
-			case diviner.String, *diviner.String:
-				val = starlark.String(value.String())
-			default:
+			val := diviner2starlark(value)
+			if val == nil {
 				panic(fmt.Sprintf("%T", value))
-				panic(value)
 			}
 			input.SetKey(starlark.String(key), val)
 		}
@@ -577,6 +559,7 @@ func makeCommand(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		Stdout: &outbuf,
 		Stderr: os.Stderr,
 	}
+	log.Debug.Printf("command: %s", strings.Join(cmd.Args, " "))
 	if cmd.Path, err = exec.LookPath(cmd.Args[0]); err != nil {
 		return nil, err
 	}
@@ -666,4 +649,53 @@ func makeToProto(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		}
 	}
 	return starlark.String(buf.String()), nil
+}
+
+// starlark2diviner translates a Starlark value to a Diviner value.
+// Nil is returned when conversion is impossible.
+func starlark2diviner(val starlark.Value) diviner.Value {
+	switch val := val.(type) {
+	case starlark.String:
+		return diviner.String(val.GoString())
+	case starlark.Float:
+		return diviner.Float(float64(val))
+	case starlark.Int:
+		v64, ok := val.Int64()
+		if !ok {
+			return nil
+		}
+		return diviner.Int(v64)
+	case *starlark.List:
+		list := make(diviner.List, val.Len())
+		for i := range list {
+			list[i] = starlark2diviner(val.Index(i))
+			if list[i] == nil {
+				return nil
+			}
+		}
+		return &list
+	default:
+		return nil
+	}
+}
+
+// diviner2starlark translates a Diviner value to a Starlark Value.
+// Nil is returned when the conversion is impossible.
+func diviner2starlark(val diviner.Value) starlark.Value {
+	switch val.(type) {
+	case diviner.Float, *diviner.Float:
+		return starlark.Float(val.Float())
+	case diviner.Int, *diviner.Int:
+		return starlark.MakeInt64(val.Int())
+	case diviner.String, *diviner.String:
+		return starlark.String(val.String())
+	case *diviner.List:
+		elems := make([]starlark.Value, val.Len())
+		for i := range elems {
+			elems[i] = diviner2starlark(val.Index(i))
+		}
+		return starlark.NewList(elems)
+	default:
+		return nil
+	}
 }

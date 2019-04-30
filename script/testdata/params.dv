@@ -1,0 +1,22 @@
+
+local = localsystem("local")
+
+def run_simple_model(values):
+    return run_config(
+        system=local,
+        script="echo %s %s" % (values["learning_rate"], values["dropout"]),
+        local_files=["x", "y", "z"],
+    )
+
+study(
+    name="test",
+    objective=maximize("sens98spec"),
+    params={
+        "learning_rate": discrete(0.1, 0.2, 0.3),
+        "dropout": discrete(0.5, 0.8),
+        "list": discrete([1,2], ["ok", 1, 0.1]),
+    },
+    run=run_simple_model,
+    oracle=grid_search,
+)
+

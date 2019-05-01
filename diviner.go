@@ -278,7 +278,10 @@ func (RunConfig) Truth() starlark.Bool { return true }
 func (RunConfig) Hash() (uint32, error) { return 0, errors.New("run_config is not hashable") }
 
 // A Study is an experiment comprising a black box, optimization
-// objective, and an oracle responsible for generating trials.
+// objective, and an oracle responsible for generating trials.  Trials
+// can either be managed by Diviner (through Run), or else handled
+// natively within Go (through Acquire). Either Run or Acquire must
+// be defined.
 type Study struct {
 	// Name is the name of the study.
 	Name string
@@ -290,6 +293,7 @@ type Study struct {
 
 	// Oracle is the oracle used to pick parameter values.
 	Oracle Oracle `json:"-"` // TODO(marius): encode oracle name/type/params?
+
 	// Run is called with a set of Values (i.e., a concrete
 	// instantiation of values in the ranges as indicated by the black
 	// box parameters defined above); it produces a run configuration
@@ -298,6 +302,11 @@ type Study struct {
 	// database). It may be used to name data and other external
 	// resources associated with the run.
 	Run func(vals Values, id string) (RunConfig, error) `json:"-"`
+
+	// Acquire returns the metrics associated with the set of
+	// parameter values that are provided. It is used to support
+	// (Go) native trials.
+	Acquire func(vals Values) (Metrics, error) `json:"-"`
 }
 
 // String returns a textual description of the study.

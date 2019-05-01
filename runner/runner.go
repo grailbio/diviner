@@ -320,9 +320,13 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 	if seq == 0 {
 		return diviner.Run{}, fmt.Errorf("invalid run sequence: %d", seq)
 	}
-	config, err := study.Run(values, fmt.Sprintf("%s:%d", study.Name, seq))
-	if err != nil {
-		return diviner.Run{}, err
+	var config diviner.RunConfig
+	if study.Run != nil {
+		var err error
+		config, err = study.Run(values, fmt.Sprintf("%s:%d", study.Name, seq))
+		if err != nil {
+			return diviner.Run{}, err
+		}
 	}
 	run := new(run)
 	run.Run, err = r.db.InsertRun(ctx, diviner.Run{Study: study.Name, Seq: seq, Values: values, Config: config})
@@ -332,6 +336,7 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 	run.Study = study
 	run.Values = values
 	run.Config = config
+	run.Acquire = study.Acquire
 	r.add(run)
 	defer r.remove(run)
 	var wg sync.WaitGroup
@@ -373,8 +378,8 @@ loop:
 		break
 	}
 	cancel()
+	wg.Wait() // wait for the last database update
 	ctx = pctx
-	wg.Wait()
 	_, message, elapsed := run.Status()
 	if err := r.db.UpdateRun(ctx, study.Name, run.Run.Seq, state, "", elapsed, int(retries)); err != nil {
 		log.Error.Printf("run %s:%d: error setting status: %v", run.Run.Study, run.Run.Seq, message)

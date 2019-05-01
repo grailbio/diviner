@@ -236,6 +236,47 @@ sleep 2
 	testScript(t, db, 0, diviner.Failure, `exit 1`)
 }
 
+func TestRunnerGo(t *testing.T) {
+	_, db, cleanup := runnerTest(t)
+	defer cleanup()
+
+	study := diviner.Study{
+		Name: "test",
+		Params: diviner.Params{
+			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1), diviner.Int(2)),
+		},
+		Acquire: func(values diviner.Values) (diviner.Metrics, error) {
+			return diviner.Metrics{"acc": float64(values["param"].Int()) * 0.87}, nil
+		},
+		Objective: diviner.Objective{diviner.Maximize, "acc"},
+		Oracle:    &oracle.GridSearch{},
+	}
+	if done := testRun(t, db, study); !done {
+		t.Fatal("not done")
+	}
+	ctx := context.Background()
+	runs, err := db.ListRuns(ctx, study.Name, diviner.Success, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(runs), 3; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for _, run := range runs {
+		if got, want := len(run.Metrics), 1; got != want {
+			t.Errorf("run %d: got %v, want %v", run.Seq, got, want)
+			continue
+		}
+		if got, want := len(run.Metrics[0]), 1; got != want {
+			t.Errorf("run %d: got %v, want %v", run.Seq, got, want)
+			continue
+		}
+		if got, want := run.Metrics[0]["acc"], float64(run.Values["param"].Int())*0.87; got != want {
+			t.Errorf("run %d: got %v, want %v", run.Seq, got, want)
+		}
+	}
+}
+
 func runnerTest(t *testing.T) (dir string, database diviner.Database, cleanup func()) {
 	t.Helper()
 	dir, cleanup = testutil.TempDir(t, "", "")

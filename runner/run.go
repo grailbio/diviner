@@ -83,6 +83,9 @@ type run struct {
 	// Config is the run config for this trial.
 	Config diviner.RunConfig
 
+	// Acquire is used to directly invoke Go code to acquire metrics.
+	Acquire func(val diviner.Values) (diviner.Metrics, error)
+
 	count int
 
 	mu            sync.Mutex
@@ -97,6 +100,10 @@ type run struct {
 // Do performs the run using the provided runner after first coordinating
 // that its dataset dependencies are satisfied through the same.
 func (r *run) Do(ctx context.Context, runner *Runner) {
+	if r.Acquire != nil {
+		r.doAcquire(ctx, runner)
+		return
+	}
 	// First, make sure that our dependent datasets have completed
 	// without error.
 	datasets := make([]*dataset, len(r.Config.Datasets))
@@ -235,6 +242,23 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 	} else {
 		r.errorf("run failed after %s: %v", elapsed, err)
 	}
+}
+
+func (r *run) doAcquire(ctx context.Context, runner *Runner) {
+	r.mu.Lock()
+	r.start = time.Now()
+	r.mu.Unlock()
+	metrics, err := r.Acquire(r.Values)
+	elapsed := time.Since(r.start)
+	if err != nil {
+		r.errorf("run failed after %s: %v", elapsed, err)
+		return
+	}
+	r.report(metrics)
+	if err := runner.db.AppendRunMetrics(ctx, r.Run.Study, r.Run.Seq, metrics); err != nil {
+		log.Error.Printf("%s:%d: failed to report metrics to DB: %v", r.Run.Study, r.Run.Seq, err)
+	}
+	r.setStatus(statusOk, elapsed.String())
 }
 
 // String returns a textual description of this run.

@@ -131,7 +131,7 @@
 //		List studies available studies or runs.
 //	diviner list -l script.dv [-runs] studies...
 //		List studies available studies defined in script.dv.
-//	diviner info [-v] names...
+//	diviner info [-v] [-l script] names...
 //		Display information for the given study or run names.
 //	diviner metrics id
 //		Writes all metrics reported by the named run in TSV format.
@@ -161,9 +161,10 @@
 // are shown. If -runs is given, the matching studies' runs are listed
 // instead.
 //
-// diviner info [-v] names... displays detailed information about the
-// matching study or run names. If -v is given then even more verbose
-// output is given.
+// diviner info [-v] [-l script] names... displays detailed
+// information about the matching study or run names. If -v is given
+// then even more verbose output is given. If -l is given, then
+// studies are loaded from the provided script.
 //
 // diviner metrics id writes all metrics reported by the provided run
 // to standard output in TSV format. Every unique metric name
@@ -253,7 +254,7 @@ func usage() {
 		List studies available studies or runs.
 	diviner list -l script.dv studies...
 		List studies available studies defined in script.dv.
-	diviner info [-v] names...
+	diviner info [-v] [-l script] names...
 		Display information for the given study or run names.
 	diviner metrics id
 		Writes all metrics reported by the named run in TSV format.
@@ -543,10 +544,13 @@ function study {
 )
 
 func info(db diviner.Database, args []string) {
-	flags := flag.NewFlagSet("list", flag.ExitOnError)
-	verbose := flags.Bool("v", false, "show all available information")
+	var (
+		flags   = flag.NewFlagSet("list", flag.ExitOnError)
+		verbose = flags.Bool("v", false, "show all available information")
+		load    = flags.String("l", "", "load studies from the provided script file")
+	)
 	flags.Usage = func() {
-		fmt.Fprintln(os.Stderr, `usage: diviner info [-v] ids...
+		fmt.Fprintln(os.Stderr, `usage: diviner info [-v] [-l script] ids...
 
 Info displays detailed information about studies or runs.`)
 		flags.PrintDefaults()
@@ -558,16 +562,17 @@ Info displays detailed information about studies or runs.`)
 	if flags.NArg() == 0 {
 		flags.Usage()
 	}
+	getter := databaseGetter(db, time.Time{})
+	if *load != "" {
+		getter = scriptGetter(*load)
+	}
 	ctx := context.Background()
 	var tw tabwriter.Writer
 	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
 	for _, arg := range flags.Args() {
 		study, seq := splitName(arg)
 		if seq == 0 {
-			study, err := db.LookupStudy(ctx, study)
-			if err != nil {
-				log.Fatal(err)
-			}
+			study := getter(ctx, study, false)[0]
 			if err := studyTemplate.Execute(&tw, study); err != nil {
 				log.Fatal(err)
 			}

@@ -850,6 +850,8 @@ values are sampled randomly from valid parameter values.`)
 	}
 	for _, name := range names {
 		switch param := study.Params[name]; param.Kind() {
+		default:
+			log.Fatalf("unsupporter parameter %s", param)
 		case diviner.Integer:
 			p := new(diviner.Int)
 			flags.Int64Var((*int64)(p), name, param.Sample(rng).Int(), "integer parameter")
@@ -862,6 +864,9 @@ values are sampled randomly from valid parameter values.`)
 			p := new(diviner.String)
 			flags.StringVar((*string)(p), name, param.Sample(rng).Str(), "string parameter")
 			values[name] = p
+		case diviner.Seq:
+			log.Printf("parameter %s (%s) cannot be overriden", name, param)
+			values[name] = param.Sample(rng)
 		}
 	}
 	if err := flags.Parse(args); err != nil {

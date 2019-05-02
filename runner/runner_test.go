@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -175,11 +176,23 @@ func TestRunnerError(t *testing.T) {
 			t.Error(err)
 			continue
 		}
-		if got, want := b.String(), `+ echo the_status
-the_status
-+ exit 1
-`; got != want {
-			t.Errorf("got %v, want %v", got, want)
+		lines := strings.Split(b.String(), "\n")
+		if got, want := len(lines), 5; got != want {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		if !strings.HasPrefix(lines[0], "diviner: ") {
+			t.Errorf("bad lines[0]: %v", lines[0])
+		}
+		expect := []string{
+			"+ echo the_status",
+			"the_status",
+			"+ exit 1",
+			"",
+		}
+		for i := range expect {
+			if got, want := lines[i+1], expect[i]; got != want {
+				t.Errorf("bad line %d: got %v, want %v", i+1, got, want)
+			}
 		}
 	}
 }

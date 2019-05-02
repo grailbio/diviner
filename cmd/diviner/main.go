@@ -520,6 +520,7 @@ var (
 	status:	{{.run.Status}}{{end}}
 	created:	{{.run.Created.Local}}
 	runtime:	{{.run.Runtime}}
+	restarts:	{{.run.Retries}}
 	values:{{range $_, $value := .run.Values.Sorted }}
 		{{$value.Name}}:	{{$value.Value}}{{end}}{{if .verbose}}{{range $index, $metrics := .run.Metrics}}
 	metrics[{{$index}}]:{{range $_, $metric := $metrics.Sorted}}

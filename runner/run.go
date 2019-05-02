@@ -171,6 +171,7 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 			log.Error.Printf("%s:%d: error closing logger: %v", r.Run.Study, r.Run.Seq, err)
 		}
 	}()
+	fmt.Fprintf(logger, "diviner: started run (try %d) at %s\n", r.count, r.start.Local())
 
 	scan := bufio.NewScanner(out)
 	// ScanProgress tells us how to scan "progress bar" output from

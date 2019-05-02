@@ -246,16 +246,16 @@ func (d *DB) UpdateRun(ctx context.Context, study string, seq uint64, state divi
 	input := &dynamodb.UpdateItemInput{
 		TableName:        aws.String(d.table),
 		Key:              key(study, seq),
-		UpdateExpression: aws.String(`SET #status = :status, #state = :state, #runtime = :runtime, #retry = :retry, #keepalive = :timestamp, #date = :date`),
+		UpdateExpression: aws.String(`SET #status = :status, #state = :state, #runtime = :runtime, #retries = :retries, #keepalive = :timestamp, #date = :date`),
 		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
 			":status":    {S: aws.String(message)},
 			":state":     {S: aws.String(state.String())},
 			":runtime":   {S: aws.String(runtime.String())},
-			":retry":     {N: aws.String(fmt.Sprint(retry))},
+			":retries":   {N: aws.String(fmt.Sprint(retry))},
 			":timestamp": {S: aws.String(now.UTC().Format(timeLayout))},
 			":date":      {S: aws.String(now.UTC().Format(dateLayout))},
 		},
-		ExpressionAttributeNames: appendAttributeNames(nil, "status", "state", "runtime", "retry", "keepalive", "date"),
+		ExpressionAttributeNames: appendAttributeNames(nil, "status", "state", "runtime", "retries", "keepalive", "date"),
 	}
 	_, err := d.db.UpdateItemWithContext(ctx, input)
 	debug("dynamodb.UpdateItem", input, nil, err)

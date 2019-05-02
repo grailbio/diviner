@@ -153,17 +153,20 @@ func (l *logger) flush(events []*cloudwatchlogs.InputLogEvent) error {
 			LogGroupName:  aws.String(l.group),
 			LogStreamName: aws.String(l.stream),
 		}
-		_, err = client.CreateLogStream(input)
+		l.logs = client
+		_, err = l.logs.CreateLogStream(input)
 		debug("cloudwatchlogs.CreateLogStream", input, nil, err)
 		if err != nil {
 			aerr, ok := err.(awserr.Error)
-			if ok && aerr.Code() != cloudwatchlogs.ErrCodeResourceAlreadyExistsException {
-				log.Error.Printf("failed to create cloudwatch stream: %v", err)
+			if !ok || aerr.Code() != cloudwatchlogs.ErrCodeResourceAlreadyExistsException {
+				log.Error.Printf("%s %s: failed to create cloudwatch stream: %v", l.group, l.stream, err)
 				return err
+			}
+			if err := l.sync(); err != nil {
+				log.Error.Printf("%s %s: failed to sync: %v", l.group, l.stream, err)
 			}
 		}
 		log.Printf("dydb: created cloudwatch stream, group %s, name %s", l.group, l.stream)
-		l.logs = client
 		return nil
 	})
 	if err != nil {
@@ -178,19 +181,40 @@ func (l *logger) flush(events []*cloudwatchlogs.InputLogEvent) error {
 	out, err := l.logs.PutLogEvents(input)
 	debug("cloudwatchlogs.PutLogEvents", input, out, err)
 	if err != nil {
-		var seq string
-		if l.logsSeq != nil {
-			seq = *l.logsSeq
+		log.Error.Printf("CloudWatchLogs.PutLogEvent %s %s: seq %s: %v", l.group, l.stream, aws.StringValue(l.logsSeq), err)
+		// Always resynchronize on error just in case. On explicity invalid
+		// sequence errors, we retry once.
+		if err := l.sync(); err != nil {
+			log.Error.Printf("%s %s: failed to sync: %v", l.group, l.stream, err)
 		}
-		log.Error.Printf("CloudWatchLogs.PutLogEvent(seq: %v): %v", seq, err)
-		// Clear the sequence, in case the error is due to missynchronized sequence
-		// tokens.  This could happens when two diviner instances are writing to the
-		// same stream due to external race.
-		l.logsSeq = nil
+		if aerr, ok := err.(awserr.Error); ok && aerr.Code() == "InvalidSequenceTokenException" {
+			if out, err := l.logs.PutLogEvents(input); err == nil {
+				l.logsSeq = out.NextSequenceToken
+			}
+		}
 	} else {
 		l.logsSeq = out.NextSequenceToken
 	}
 	return err
+}
+
+// sync synchronizes this logger's sequence token.
+func (l *logger) sync() error {
+	out, err := l.logs.DescribeLogStreams(&cloudwatchlogs.DescribeLogStreamsInput{
+		LogGroupName:        aws.String(l.group),
+		LogStreamNamePrefix: aws.String(l.stream),
+		OrderBy:             aws.String("LogStreamName"),
+	})
+	if err != nil {
+		return err
+	}
+	for _, stream := range out.LogStreams {
+		if aws.StringValue(stream.LogStreamName) == l.stream {
+			l.logsSeq = stream.UploadSequenceToken
+			return nil
+		}
+	}
+	return fmt.Errorf("dydb.logger: log stream %s not found", l.stream)
 }
 
 type logReader struct {

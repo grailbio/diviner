@@ -98,3 +98,35 @@ func TestGridSearchRange(t *testing.T) {
 		}
 	}
 }
+
+func TestGridSearchList(t *testing.T) {
+	params := diviner.Params{
+		"x": diviner.NewDiscrete(&diviner.List{}, &diviner.List{diviner.Int(1)}),
+	}
+	var search oracle.GridSearch
+	values, err := search.Next(nil, params, diviner.Objective{}, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(values), 2; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	diviner.SortValues(values)
+	if got, want := values[0]["x"].Len(), 0; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if got, want := values[1]["x"].Len(), 1; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	// Take out a value and make sure we get the right one back.
+	values, err = search.Next([]diviner.Trial{{Values: values[0]}}, params, diviner.Objective{}, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(values), 1; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if got, want := values[0]["x"].Len(), 1; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}

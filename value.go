@@ -165,7 +165,7 @@ func (l *List) Less(m Value) bool {
 			return false
 		}
 	}
-	return false
+	return l.Len() < m.Len()
 }
 
 // String implements Value.

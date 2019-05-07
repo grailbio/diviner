@@ -10,8 +10,8 @@ import (
 	"encoding/gob"
 	"fmt"
 	"io"
+	"log"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -69,7 +69,7 @@ func TestRunner(t *testing.T) {
 		Params: diviner.Params{
 			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1), diviner.Int(2)),
 		},
-		Run: func(values diviner.Values, id string) (diviner.RunConfig, error) {
+		Run: func(values diviner.Values, replicate int, id string) (diviner.RunConfig, error) {
 			return diviner.RunConfig{
 				Systems:  systems,
 				Datasets: []diviner.Dataset{dataset},
@@ -97,17 +97,24 @@ func TestRunner(t *testing.T) {
 		trials[i] = run.Trial()
 	}
 	sort.Slice(trials, func(i, j int) bool {
-		return trials[i].Values["param"].Int() < trials[j].Values["param"].Int()
+		return trials[i].Values["param"].Less(trials[j].Values["param"])
 	})
 	expect := make([]diviner.Trial, 3)
 	for i := range expect {
 		expect[i] = diviner.Trial{
-			Values:  diviner.Values{"param": diviner.Int(i)},
+			Values: diviner.Values{
+				"param": diviner.Int(i),
+			},
 			Metrics: diviner.Metrics{"paramvalue": float64(i), "another": 3},
 		}
 	}
-	if got, want := trials, expect; !reflect.DeepEqual(got, want) {
-		t.Errorf("got %v, want %v", got, want)
+	if got, want := len(trials), len(expect); got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range trials {
+		if !trials[i].Equal(expect[i]) {
+			t.Errorf("got %v, want %v", trials[i], expect[i])
+		}
 	}
 	// Make sure the machines are stopped.
 	for _, m := range test.B().Machines() {
@@ -115,6 +122,165 @@ func TestRunner(t *testing.T) {
 			t.Errorf("machine %v did not stop", m)
 		}
 	}
+}
+
+func TestReplicates(t *testing.T) {
+	_, db, cleanup := runnerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	test := testsystem.New()
+	systems := []*diviner.System{
+		&diviner.System{ID: "test", System: test},
+	}
+
+	study := diviner.Study{
+		Name: "test",
+		Params: diviner.Params{
+			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1), diviner.Int(2)),
+		},
+		Replicates: 3,
+		Run: func(values diviner.Values, replicate int, id string) (diviner.RunConfig, error) {
+			return diviner.RunConfig{
+				Systems: systems,
+				Script: fmt.Sprintf(`
+						# Dataset should have been produced.
+						echo METRICS: replicate=%d
+					`, replicate),
+			}, nil
+		},
+		Objective: diviner.Objective{diviner.Maximize, "replicate"},
+		Oracle:    &oracle.GridSearch{},
+	}
+	if done := testRun(t, db, study); !done {
+		t.Fatal("not done")
+	}
+	runs, err := db.ListRuns(ctx, study.Name, diviner.Success, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(runs), 3*3; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	var seen [9]bool
+	for _, run := range runs {
+		seen[int(run.Values["param"].Int())*3+run.Replicate] = true
+	}
+	for i, ok := range seen {
+		if !ok {
+			t.Fatalf("missing combination %v", i)
+		}
+	}
+
+	trials, err := diviner.Trials(ctx, db, study)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if got, want := trials.Len(), 3; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	trials.Range(func(_ diviner.Value, v interface{}) {
+		trial := v.(diviner.Trial)
+		if got, want := trial.Metrics["replicate"], 1.0; got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+}
+
+func TestReplicatesError(t *testing.T) {
+	_, db, cleanup := runnerTest(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	test := testsystem.New()
+	systems := []*diviner.System{
+		&diviner.System{ID: "test", System: test},
+	}
+
+	failReplicate0 := true
+	study := diviner.Study{
+		Name: "test",
+		Params: diviner.Params{
+			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1), diviner.Int(2)),
+		},
+		Replicates: 3,
+		Run: func(values diviner.Values, replicate int, id string) (diviner.RunConfig, error) {
+			script := fmt.Sprintf(`
+				echo METRICS: replicate=%d
+				`, replicate)
+			if replicate == 0 && failReplicate0 {
+				script = "exit 1"
+			}
+			return diviner.RunConfig{
+				Systems: systems,
+				Script:  script,
+			}, nil
+		},
+		Objective: diviner.Objective{diviner.Maximize, "replicate"},
+		Oracle:    &oracle.GridSearch{},
+	}
+	if done := testRun(t, db, study); done {
+		t.Fatal("done")
+	}
+	runs, err := db.ListRuns(ctx, study.Name, diviner.Success, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(runs), 3*2; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+
+	trials, err := diviner.Trials(ctx, db, study)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if got, want := trials.Len(), 3; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	var replicates diviner.Replicates
+	replicates.Set(1)
+	replicates.Set(2)
+	trials.Range(func(_ diviner.Value, v interface{}) {
+		trial := v.(diviner.Trial)
+		if got, want := trial.Metrics["replicate"], 1.5; got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
+
+		if got, want := trial.Replicates, replicates; got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	// Re-run. This time it should catch up only the missing replicates.
+	failReplicate0 = false
+	if done := testRun(t, db, study); !done {
+		t.Fatal("not done")
+	}
+	runs, err = db.ListRuns(ctx, study.Name, diviner.Success, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(runs), 3*3; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+
+	trials, err = diviner.Trials(ctx, db, study)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if got, want := trials.Len(), 3; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	replicates.Set(0)
+	trials.Range(func(_ diviner.Value, v interface{}) {
+		trial := v.(diviner.Trial)
+		if got, want := trial.Metrics["replicate"], 1.0; got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
+		if got, want := trial.Replicates, replicates; got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
 }
 
 func TestRunnerError(t *testing.T) {
@@ -134,7 +300,7 @@ func TestRunnerError(t *testing.T) {
 		Params: diviner.Params{
 			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1)),
 		},
-		Run: func(values diviner.Values, id string) (diviner.RunConfig, error) {
+		Run: func(values diviner.Values, replicate int, id string) (diviner.RunConfig, error) {
 			config := diviner.RunConfig{
 				Systems: systems,
 				Script:  "echo the_status; exit 1",
@@ -298,7 +464,7 @@ func testScript(t *testing.T, db diviner.Database, retries int, state diviner.Ru
 		}
 	}()
 	study := testStudy(script)
-	run, err := r.Run(ctx, study, nil)
+	run, err := r.Run(ctx, study, nil, 0)
 	cancel()
 	if err != nil {
 		t.Fatal(err)
@@ -320,7 +486,7 @@ func testStudy(script string) diviner.Study {
 		Params: diviner.Params{
 			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1)),
 		},
-		Run: func(values diviner.Values, id string) (diviner.RunConfig, error) {
+		Run: func(values diviner.Values, replicate int, id string) (diviner.RunConfig, error) {
 			config := diviner.RunConfig{
 				Systems: systems,
 				Script:  script,

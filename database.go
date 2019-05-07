@@ -56,6 +56,9 @@ type Run struct {
 	// a run.
 	Seq uint64
 
+	// Replicate is the replicate of this run.
+	Replicate int
+
 	// State is the current state of the run. See RunState for
 	// descriptions of these.
 	State RunState
@@ -90,7 +93,8 @@ type Run struct {
 // TODO(marius): allow other metric selection policies
 // (e.g., minimize train and test loss difference)
 func (r Run) Trial() Trial {
-	trial := Trial{Values: r.Values, Pending: r.State != Success}
+	trial := Trial{Values: r.Values, Pending: r.State != Success, Runs: []Run{r}}
+	trial.Replicates.Set(r.Replicate)
 	if len(r.Metrics) > 0 {
 		trial.Metrics = r.Metrics[len(r.Metrics)-1]
 	}
@@ -147,4 +151,59 @@ type Database interface {
 	// Logger returns an io.WriteCloser, to which log messages can be written,
 	// for the run named by a study and sequence number.
 	Logger(study string, seq uint64) io.WriteCloser
+}
+
+// Trials queries the database db for all runs in the provided study,
+// and returns a set of composite trials for each replicate of a
+// value set. The returned map maps value sets to these composite
+// trials.
+//
+// Trial metrics are averaged across successful and pending runs;
+// flags are set on the returned trials to indicate which replicates
+// they comprise and whether any pending results were used.
+//
+// TODO(marius): this is a reasonable approach for some metrics, but
+// not for others. We should provide a way for users to (e.g., as
+// part of a study definition) to define their own means of defining
+// composite metrics, e.g., by intepreting metrics from each run, or
+// their outputs directly (e.g., predictions from an evaluation run).
+func Trials(ctx context.Context, db Database, study Study) (*Map, error) {
+	runs, err := db.ListRuns(ctx, study.Name, Success|Pending, time.Time{})
+	if err != nil && err != ErrNotExist {
+		return nil, err
+	}
+	replicates := NewMap()
+	for i := range runs {
+		var trials []Trial
+		if v, ok := replicates.Get(runs[i].Values); ok {
+			trials = v.([]Trial)
+		}
+		trials = append(trials, runs[i].Trial())
+		replicates.Put(runs[i].Values, trials)
+	}
+	trials := NewMap()
+	replicates.Range(func(key Value, v interface{}) {
+		var (
+			reps   = v.([]Trial)
+			counts = make(map[string]int)
+			values = key.(Values)
+			trial  = Trial{Values: values, Metrics: make(Metrics)}
+		)
+		for _, rep := range reps {
+			if trial.Replicates&rep.Replicates != 0 {
+				// TODO(marius): pick "best" replicate?
+				continue
+			}
+			for name, value := range rep.Metrics {
+				counts[name]++
+				n := float64(counts[name])
+				trial.Metrics[name] = value/n + trial.Metrics[name]*(n-1)/n
+			}
+			trial.Pending = trial.Pending || rep.Pending
+			trial.Replicates |= rep.Replicates
+			trial.Runs = append(trial.Runs, rep.Runs...)
+		}
+		trials.Put(&values, trial)
+	})
+	return trials, nil
 }

@@ -520,6 +520,7 @@ func appendStudies(studies []diviner.Study, items ...map[string]*dynamodb.Attrib
 type dynamodbRun struct {
 	Study     string            `dynamoattr:"study"`
 	Seq       uint64            `dynamoattr:"run"`
+	Replicate int               `dynamoattr:"replicate"`
 	Values    []byte            `dynamoattr:"values"`
 	Metrics   []diviner.Metrics `dynamoattr:"metrics"`
 	State     string            `dynamoattr:"state"`
@@ -536,6 +537,7 @@ func marshal(run diviner.Run) (map[string]*dynamodb.AttributeValue, error) {
 	var dyrun dynamodbRun
 	dyrun.Study = run.Study
 	dyrun.Seq = run.Seq
+	dyrun.Replicate = run.Replicate
 	b := new(bytes.Buffer)
 	if err := gob.NewEncoder(b).Encode(run.Values); err != nil {
 		return nil, err
@@ -568,6 +570,7 @@ func unmarshal(attrs map[string]*dynamodb.AttributeValue) (diviner.Run, error) {
 	var run diviner.Run
 	run.Study = dyrun.Study
 	run.Seq = dyrun.Seq
+	run.Replicate = dyrun.Replicate
 	if err := gob.NewDecoder(bytes.NewReader(dyrun.Values)).Decode(&run.Values); err != nil {
 		return diviner.Run{}, errors.E("decode values", err)
 	}

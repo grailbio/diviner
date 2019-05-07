@@ -5,8 +5,13 @@
 package diviner
 
 import (
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
+	"hash"
+	"hash/fnv"
+	"io"
+	"math"
 	"sort"
 	"strings"
 )
@@ -15,7 +20,8 @@ func init() {
 	gob.Register(Float(0))
 	gob.Register(Int(0))
 	gob.Register(String(""))
-	gob.Register(&List{})
+	gob.Register(List{})
+	gob.Register(&Map{})
 }
 
 // Kind represents the kind of a value.
@@ -26,6 +32,7 @@ const (
 	Real
 	Str
 	Seq
+	ValueDict
 )
 
 func (k Kind) String() string {
@@ -38,6 +45,8 @@ func (k Kind) String() string {
 		return "string"
 	case Seq:
 		return "seq"
+	case ValueDict:
+		return "valuedict"
 	default:
 		panic(k)
 	}
@@ -51,6 +60,10 @@ type Value interface {
 
 	// Kind returns the kind of this value.
 	Kind() Kind
+
+	// Equal tells whether two values are equal. Values of different
+	// kinds are never equal.
+	Equal(Value) bool
 
 	// Less returns true if the value is less than the provided value.
 	// Less is defined only for values of the same type.
@@ -70,6 +83,27 @@ type Value interface {
 
 	// Index returns the value at an index of a sequence.
 	Index(i int) Value
+
+	// Hash adds the value's hask to the provided hasher.
+	Hash(h hash.Hash)
+}
+
+// Zero returns the zero value for the provided kind.
+func Zero(kind Kind) Value {
+	switch kind {
+	default:
+		panic(kind)
+	case Integer:
+		return Int(0)
+	case Real:
+		return Float(0)
+	case Str:
+		return String("")
+	case ValueDict:
+		return new(Values)
+	case Seq:
+		return new(List)
+	}
 }
 
 // Int is an integer-typed value.
@@ -80,6 +114,13 @@ func (v Int) String() string { return fmt.Sprint(int64(v)) }
 
 // Kind implements Value.
 func (Int) Kind() Kind { return Integer }
+
+func (v Int) Equal(w Value) bool {
+	if w.Kind() != Integer {
+		return false
+	}
+	return v.Int() == w.Int()
+}
 
 // Less implements Value.
 func (v Int) Less(w Value) bool {
@@ -95,8 +136,17 @@ func (Int) Str() string { panic("Str on Int") }
 // Int implements Value.
 func (v Int) Int() int64 { return int64(v) }
 
-func (Int) Len() int        { panic("Len on Int") }
-func (Int) Index(int) Value { panic("Index on Int") }
+func (Int) Len() int                            { panic("Len on Int") }
+func (Int) Index(int) Value                     { panic("Index on Int") }
+func (Int) Put(key string, value Value)         { panic("Put on Int") }
+func (Int) Get(key string) Value                { panic("Get on Int") }
+func (Int) Range(func(key string, value Value)) { panic("Range on Int") }
+
+func (v Int) Hash(h hash.Hash) {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], uint64(v.Int()))
+	h.Write(b[:])
+}
 
 // Float is a float-typed value.
 type Float float64
@@ -106,6 +156,13 @@ func (v Float) String() string { return fmt.Sprint(float64(v)) }
 
 // Kind implements Value.
 func (Float) Kind() Kind { return Real }
+
+func (v Float) Equal(w Value) bool {
+	if w.Kind() != Real {
+		return false
+	}
+	return v.Float() == w.Float()
+}
 
 // Less implements Value.
 func (v Float) Less(w Value) bool {
@@ -121,11 +178,27 @@ func (Float) Str() string { panic("Str on Float") }
 // Int implements Value.
 func (Float) Int() int64 { panic("Int on Float") }
 
-func (Float) Len() int        { panic("Len on Float") }
-func (Float) Index(int) Value { panic("Index on Float") }
+func (Float) Len() int                            { panic("Len on Float") }
+func (Float) Index(int) Value                     { panic("Index on Float") }
+func (Float) Put(key string, value Value)         { panic("Put on Float") }
+func (Float) Get(key string) Value                { panic("Get on Float") }
+func (Float) Range(func(key string, value Value)) { panic("Range on Float") }
+
+func (v Float) Hash(h hash.Hash) {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], math.Float64bits(v.Float()))
+	h.Write(b[:])
+}
 
 // String is a string-typed value.
 type String string
+
+func (v String) Equal(w Value) bool {
+	if w.Kind() != Str {
+		return false
+	}
+	return v.Str() == w.Str()
+}
 
 // Less implements Value.
 func (v String) Less(w Value) bool {
@@ -147,14 +220,36 @@ func (String) Int() int64 { panic("Int on String") }
 // Str implements Value.
 func (v String) Str() string { return string(v) }
 
-func (String) Len() int        { panic("Len on String") }
-func (String) Index(int) Value { panic("Index on String") }
+func (String) Len() int                            { panic("Len on String") }
+func (String) Index(int) Value                     { panic("Index on String") }
+func (String) Put(key string, value Value)         { panic("Put on String") }
+func (String) Get(key string) Value                { panic("Get on String") }
+func (String) Range(func(key string, value Value)) { panic("Range on String") }
 
-// *List is a list-typed value.
+func (v String) Hash(h hash.Hash) {
+	io.WriteString(h, v.Str())
+}
+
+// List is a list-typed value.
 type List []Value
 
+func (l List) Equal(m Value) bool {
+	if m.Kind() != Seq {
+		return false
+	}
+	if l.Len() != m.Len() {
+		return false
+	}
+	for i := 0; i < l.Len(); i++ {
+		if !l.Index(i).Equal(m.Index(i)) {
+			return false
+		}
+	}
+	return true
+}
+
 // Less implements Value.
-func (l *List) Less(m Value) bool {
+func (l List) Less(m Value) bool {
 	for i := 0; i < l.Len(); i++ {
 		if m.Len() <= i {
 			break
@@ -169,7 +264,7 @@ func (l *List) Less(m Value) bool {
 }
 
 // String implements Value.
-func (l *List) String() string {
+func (l List) String() string {
 	elems := make([]string, l.Len())
 	for i := range elems {
 		elems[i] = l.Index(i).String()
@@ -178,22 +273,32 @@ func (l *List) String() string {
 }
 
 // Kind implements Value.
-func (*List) Kind() Kind { return Seq }
+func (List) Kind() Kind { return Seq }
 
 // Float implements Value.
-func (*List) Float() float64 { panic("Float on List") }
+func (List) Float() float64 { panic("Float on List") }
 
 // Int implements Value.
-func (*List) Int() int64 { panic("Int on List") }
+func (List) Int() int64 { panic("Int on List") }
 
 // Str implements Value.
-func (*List) Str() string { panic("Str on List") }
+func (List) Str() string { panic("Str on List") }
 
 // Len returns the length of the list.
-func (l *List) Len() int { return len(*l) }
+func (l List) Len() int { return len(l) }
 
 // Index returns the ith element of the list.
-func (l *List) Index(i int) Value { return (*l)[i] }
+func (l List) Index(i int) Value { return l[i] }
+
+func (List) Put(key string, value Value)         { panic("Put on *List") }
+func (List) Get(key string) Value                { panic("Get on *List") }
+func (List) Range(func(key string, value Value)) { panic("Range on *List") }
+
+func (l List) Hash(h hash.Hash) {
+	for _, v := range l {
+		v.Hash(h)
+	}
+}
 
 // A NamedValue is a value that is assigned a name.
 type NamedValue struct {
@@ -201,11 +306,61 @@ type NamedValue struct {
 	Value
 }
 
-// Values is a set of named value, used as a concrete instantiation
-// of a set of parameters.
+// Values is a sorted set of named values, used as a concrete
+// instantiation of a set of parameters.
+//
+// Note: the representation of Values is not optimal. Ideally we
+// would store it as a sorted list of NamedValues. However, backwards
+// compatibility (by way of gob) forces our hand here.
 type Values map[string]Value
 
-// Sorted returns the values in v sorted by name.
+// String returns a (stable) textual description of the value set.
+func (v Values) String() string {
+	elems := make([]string, v.Len())
+	for i, v := range v.Sorted() {
+		elems[i] = fmt.Sprintf("%s=%s", v.Name, v.Value)
+	}
+	return strings.Join(elems, ",")
+}
+
+func (Values) Kind() Kind { return ValueDict }
+
+func (v Values) Equal(wv Value) bool {
+	w, ok := wv.(Values)
+	if !ok {
+		return false
+	}
+	if v.Len() != w.Len() {
+		return false
+	}
+	vlist, wlist := v.Sorted(), w.Sorted()
+	for i := range vlist {
+		if vlist[i].Name != wlist[i].Name {
+			return false
+		}
+		if !vlist[i].Equal(wlist[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func (Values) Less(Value) bool { panic("Less on Values") }
+func (Values) Float() float64  { panic("Float on Values") }
+func (Values) Int() int64      { panic("Int on Values") }
+func (Values) Str() string     { panic("Str on Values") }
+
+func (v Values) Len() int { return len(v) }
+
+func (Values) Index(i int) Value { panic("Index on Values") }
+
+func (v Values) Hash(h hash.Hash) {
+	for _, v := range v.Sorted() {
+		String(v.Name).Hash(h)
+		v.Value.Hash(h)
+	}
+}
+
 func (v Values) Sorted() []NamedValue {
 	vals := make([]NamedValue, 0, len(v))
 	for k, v := range v {
@@ -215,35 +370,9 @@ func (v Values) Sorted() []NamedValue {
 	return vals
 }
 
-func (v Values) Equal(w Values) bool {
-	if len(v) != len(w) {
-		return false
-	}
-	for k, vv := range v {
-		wv, ok := w[k]
-		if !ok {
-			return false
-		}
-		if vv.Kind() != wv.Kind() {
-			return false
-		}
-		if vv.Less(wv) || wv.Less(vv) {
-			return false
-		}
-	}
-	return true
-}
-
-// String returns a (stable) textual description of the value set.
-func (v Values) String() string {
-	keys := make([]string, 0, len(v))
-	for key := range v {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	elems := make([]string, len(keys))
-	for i, key := range keys {
-		elems[i] = fmt.Sprintf("%s=%s", key, v[key])
-	}
-	return strings.Join(elems, ",")
+// Hash returns a 64-bit hash for the value v.
+func Hash(v Value) uint64 {
+	h := fnv.New64a()
+	v.Hash(h)
+	return h.Sum64()
 }

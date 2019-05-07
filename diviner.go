@@ -94,6 +94,38 @@ func (m *Metrics) Merge(n Metrics) {
 	}
 }
 
+// Replicates is a bitset of replicate numbers.
+type Replicates uint64
+
+// Completed reports whether n replicates have completed in
+// the replicate set r.
+func (r Replicates) Completed(n int) bool {
+	mask := Replicates(1<<uint(n) - 1)
+	return r&mask == mask
+}
+
+// Contains reports whether the replicate set r contains the
+// replicate number rep.
+func (r Replicates) Contains(rep int) bool {
+	return r&(1<<uint(rep)) != 0
+}
+
+// Set sets the replicate number rep in the replicate set r.
+func (r *Replicates) Set(rep int) {
+	if rep >= 64 {
+		panic(rep)
+	}
+	*r |= 1 << uint(rep)
+}
+
+// Clear clears the replicate number rep in the replicate set r.
+func (r *Replicates) Clear(rep int) {
+	if rep >= 64 {
+		panic(rep)
+	}
+	*r &= ^(1 << uint(rep))
+}
+
 // A Trial is the result of a single run of a black box.
 type Trial struct {
 	// Values is the set of parameter values used for the run.
@@ -104,6 +136,13 @@ type Trial struct {
 	// Pending indicates whether this is a pending trial. Pending trials
 	// may have incomplete or non-final metrics.
 	Pending bool
+
+	// Replicates contains the set of completed replicates
+	// comprising this trial. Replicates are stored in a bitset.
+	Replicates Replicates
+
+	// Runs stores the set of runs comprised by this trial.
+	Runs []Run
 }
 
 // Equal reports whether the two trials are equal.
@@ -291,6 +330,10 @@ type Study struct {
 	// study.
 	Params Params
 
+	// Replicates is the number of additional replicates required for
+	// each trial in the study.
+	Replicates int
+
 	// Oracle is the oracle used to pick parameter values.
 	Oracle Oracle `json:"-"` // TODO(marius): encode oracle name/type/params?
 
@@ -298,10 +341,11 @@ type Study struct {
 	// instantiation of values in the ranges as indicated by the black
 	// box parameters defined above); it produces a run configuration
 	// which is then used to conduct a trial of these parameter values.
-	// Parameter id is a unique id for the run (vis-a-vis diviner's
-	// database). It may be used to name data and other external
-	// resources associated with the run.
-	Run func(vals Values, id string) (RunConfig, error) `json:"-"`
+	// The run's replicate number is passed in. (This may be used to,
+	// e.g., select a model fold.) Parameter id is a unique id for the
+	// run (vis-a-vis diviner's database). It may be used to name data
+	// and other external resources associated with the run.
+	Run func(vals Values, replicate int, id string) (RunConfig, error) `json:"-"`
 
 	// Acquire returns the metrics associated with the set of
 	// parameter values that are provided. It is used to support

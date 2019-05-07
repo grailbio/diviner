@@ -199,7 +199,7 @@ func (s *Skopt) Next(inputTrials []diviner.Trial, params diviner.Params, objecti
 		if len(record) != len(sortedParams) {
 			panic(record)
 		}
-		vals := make(diviner.Values)
+		var vals diviner.Values
 		for j, param := range sortedParams {
 			var (
 				val diviner.Value

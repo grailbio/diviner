@@ -21,9 +21,9 @@ import (
 	"time"
 
 	"github.com/grailbio/base/log"
-	"github.com/grailbio/base/traverse"
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/diviner"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -124,7 +124,7 @@ func (r *Runner) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		for _, run := range r.runs[name] {
 			row[0] = fmt.Sprint(run.Run.Seq)
 			for i, key := range sorted {
-				if v, ok := run.Values[key]; ok {
+				if v := run.Values[key]; v != nil {
 					row[i+1] = v.String()
 				} else {
 					row[i+1] = "NA"
@@ -307,7 +307,7 @@ outer:
 // methods on diviner.Run); all errors are runtime errors, not errors
 // of the run itself. The run is registered with the runner and will
 // show up in the various introspection facilities. Run
-func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Values) (diviner.Run, error) {
+func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Values, replicate int) (diviner.Run, error) {
 	pctx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	if _, err := r.db.CreateStudyIfNotExist(ctx, study); err != nil {
@@ -323,13 +323,19 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 	var config diviner.RunConfig
 	if study.Run != nil {
 		var err error
-		config, err = study.Run(values, fmt.Sprintf("%s:%d", study.Name, seq))
+		config, err = study.Run(values, replicate, fmt.Sprintf("%s:%d", study.Name, seq))
 		if err != nil {
 			return diviner.Run{}, err
 		}
 	}
 	run := new(run)
-	run.Run, err = r.db.InsertRun(ctx, diviner.Run{Study: study.Name, Seq: seq, Values: values, Config: config})
+	run.Run, err = r.db.InsertRun(ctx, diviner.Run{
+		Study:     study.Name,
+		Seq:       seq,
+		Replicate: replicate,
+		Values:    values,
+		Config:    config,
+	})
 	if err != nil {
 		return diviner.Run{}, err
 	}
@@ -391,28 +397,61 @@ loop:
 }
 
 func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (done bool, err error) {
-	complete, err := r.db.ListRuns(ctx, study.Name, diviner.Success|diviner.Pending, time.Time{})
-	if err != nil && err != diviner.ErrNotExist {
+	trials, err := diviner.Trials(ctx, r.db, study)
+	if err != nil {
 		return false, err
 	}
-	trials := make([]diviner.Trial, len(complete))
-	for i, run := range complete {
-		trials[i] = run.Trial()
-	}
-	log.Printf("%s: requesting new points from oracle from %d trials", study.Name, len(trials))
-	values, err := study.Oracle.Next(trials, study.Params, study.Objective, ntrials)
+	log.Printf("%s: requesting new points from oracle from %d trials", study.Name, trials.Len())
+
+	var complete []diviner.Trial
+	trials.Range(func(_ diviner.Value, v interface{}) {
+		trial := v.(diviner.Trial)
+		if trial.Replicates.Completed(study.Replicates) {
+			complete = append(complete, trial)
+		}
+	})
+
+	values, err := study.Oracle.Next(complete, study.Params, study.Objective, ntrials)
 	if err != nil {
 		return false, err
 	}
 	if len(values) == 0 {
 		return true, nil
 	}
-	runs := make([]diviner.Run, len(values))
-	err = traverse.Each(len(values), func(i int) (err error) {
-		runs[i], err = r.Run(ctx, study, values[i])
-		return
-	})
-	if err != nil {
+	g, ctx := errgroup.WithContext(ctx)
+	var (
+		mu   sync.Mutex
+		runs []diviner.Run
+	)
+	for i := range values {
+		var (
+			vals = values[i]
+			ran  diviner.Replicates
+		)
+		if v, ok := trials.Get(vals); ok {
+			ran = v.(diviner.Trial).Replicates
+		}
+		nreplicates := study.Replicates
+		if nreplicates == 0 {
+			nreplicates = 1
+		}
+		for replicate := 0; replicate < nreplicates; replicate++ {
+			if ran.Contains(replicate) {
+				continue
+			}
+			replicate := replicate
+			g.Go(func() error {
+				run, err := r.Run(ctx, study, vals, int(replicate))
+				if err == nil {
+					mu.Lock()
+					runs = append(runs, run)
+					mu.Unlock()
+				}
+				return err
+			})
+		}
+	}
+	if err := g.Wait(); err != nil {
 		return false, err
 	}
 	for _, run := range runs {
@@ -420,7 +459,7 @@ func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (d
 			return false, nil
 		}
 	}
-	return ntrials == 0 || (len(runs) < ntrials), nil
+	return ntrials == 0 || (len(values) < ntrials), nil
 }
 
 // Allocate allocates a new worker and returns it. Workers must

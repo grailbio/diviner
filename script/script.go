@@ -64,19 +64,23 @@
 //		- datasets:    a list of datasets that must be available before
 //		               the trial can proceed.
 //
-//	study(name, params, objective, run, oracle?)
+//	study(name, params, objective, run, replicates?, oracle?)
 //		A toplevel function that declares a named study with the provided
 //		parameters, runner, and objectives.
-//		- name:      a string specifying the name of the study;
-//		- objective: the optimization objective;
-//		- params:    a dictionary with naming a set of parameters
-//		             to be optimized;
-//		- run:       a function that returns a run_config for a set
-//		             of parameter values; the first argument to the function
-//		             is a dictionary of parameter values. An optional second
-//		             argument provides the ID for the run. This can be used
-//		             to name data and other external resources.
-//		- oracle:    the oracle to use (grid search by default).
+//		- name:       a string specifying the name of the study;
+//		- objective:  the optimization objective;
+//		- params:     a dictionary with naming a set of parameters
+//		              to be optimized;
+//		- run:        a function that returns a run_config for a set
+//		              of parameter values; the first argument to the function
+//		              is a dictionary of parameter values. A number of optional,
+//		              named arguments follow: "id" is a string providing the
+//		              run's diviner ID, which may be used as an external key to
+//		              reference a particular run; "replicate" is an integer
+//		              specifying the replicate number associated with the run.
+//		- replicates: the number of replicates to perform for each parameter
+// 		              combination.
+//		- oracle:     the oracle to use (grid search by default).
 //
 //	grid_search
 //		The grid search oracle
@@ -323,6 +327,7 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 		"run", &runner,
 		"objective", &study.Objective,
 		"oracle?", &oracle,
+		"replicates?", &study.Replicates,
 	)
 	if err != nil {
 		return nil, err
@@ -339,7 +344,14 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 			return nil, fmt.Errorf("parameter %s is not a valid parameter", string(keystr))
 		}
 	}
-	study.Run = func(vals diviner.Values, runID string) (diviner.RunConfig, error) {
+	for i := 1; i < runner.NumParams(); i++ {
+		switch name, _ := runner.Param(i); name {
+		default:
+			return nil, fmt.Errorf("illegal parameter name %s in run function", name)
+		case "id", "replicate":
+		}
+	}
+	study.Run = func(vals diviner.Values, replicate int, runID string) (diviner.RunConfig, error) {
 		var input starlark.Dict
 		for key, value := range vals {
 			val := diviner2starlark(value)
@@ -351,9 +363,17 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 		thread := &starlark.Thread{
 			Name: "diviner",
 		}
-		args := starlark.Tuple{&input}
-		if runner.NumParams() > 1 {
-			args = append(args, starlark.String(runID))
+		args := make(starlark.Tuple, runner.NumParams())
+		args[0] = &input
+		for i := 1; i < runner.NumParams(); i++ {
+			switch name, _ := runner.Param(i); name {
+			default:
+				panic(name)
+			case "id":
+				args[i] = starlark.String(runID)
+			case "replicate":
+				args[i] = starlark.MakeInt(replicate)
+			}
 		}
 		val, err := starlark.Call(thread, runner, args, nil)
 		if err != nil {

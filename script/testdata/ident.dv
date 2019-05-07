@@ -2,5 +2,5 @@ study(
     name="with_ident",
     objective=minimize("x"),
     params={"dummy": discrete("dummy")},
-    run=lambda vs, ident: run_config(system=localsystem("local", 1), script=ident),
+    run=lambda vs, id: run_config(system=localsystem("local", 1), script=id),
 )

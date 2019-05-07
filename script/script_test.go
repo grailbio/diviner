@@ -50,7 +50,7 @@ func TestScript(t *testing.T) {
 	runConfig, err := studies[0].Run(diviner.Values{
 		"learning_rate": diviner.Float(0.1),
 		"dropout":       diviner.Float(0.5),
-	}, "testrun")
+	}, 0, "testrun")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,10 +89,10 @@ func TestParams(t *testing.T) {
 	if got, want := len(lists), 2; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
-	if got, want := lists[0], (&diviner.List{diviner.Int(1), diviner.Int(2)}); !dequal(got, want) {
+	if got, want := lists[0], (diviner.List{diviner.Int(1), diviner.Int(2)}); !dequal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	if got, want := lists[1], (&diviner.List{diviner.String("ok"), diviner.Int(1), diviner.Float(0.1)}); !dequal(got, want) {
+	if got, want := lists[1], (diviner.List{diviner.String("ok"), diviner.Int(1), diviner.Float(0.1)}); !dequal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
@@ -106,11 +106,29 @@ func TestScriptIdent(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 	study := studies[0]
-	config, err := study.Run(nil, "test1")
+	config, err := study.Run(nil, 0, "test1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := config.Script, "test1"; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestScriptReplicate(t *testing.T) {
+	studies, err := script.Load("testdata/replicate.dv", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(studies), 1; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	study := studies[0]
+	config, err := study.Run(nil, 123, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := config.Script, "test123"; got != want {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
@@ -124,7 +142,7 @@ func TestProto(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 	study := studies[0]
-	config, err := study.Run(nil, "test1")
+	config, err := study.Run(nil, 0, "test1")
 	if err != nil {
 		t.Fatal(err)
 	}

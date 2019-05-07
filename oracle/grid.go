@@ -63,9 +63,9 @@ func (_ *GridSearch) Next(previous []diviner.Trial,
 	// integers, and map them back into parameter space. This allows us
 	// to cheaply check whether a set of parameter values have already
 	// been tried.
-	digits := make(map[string]*valueMap)
+	digits := make(map[string]*diviner.Map)
 	for key, values := range pvalues {
-		digits[key] = newValueMap()
+		digits[key] = diviner.NewMap()
 		for i, v := range values {
 			digits[key].Put(v, i)
 		}
@@ -84,7 +84,7 @@ outer:
 				log.Printf("skipping trial %v because it is missing a value for parameter %s", trial, key)
 				continue outer
 			}
-			num += m * digit
+			num += m * int(digit.(int))
 			m *= len(pvalues[key])
 		}
 		done[num] = true
@@ -110,44 +110,4 @@ outer:
 		}
 	}
 	return values, nil
-}
-
-type valueMap struct {
-	values map[diviner.Value]int
-	lists  []diviner.Value
-}
-
-func newValueMap() *valueMap {
-	return &valueMap{
-		values: make(map[diviner.Value]int),
-	}
-}
-
-// Put associates the provided index with the provided value.
-func (m *valueMap) Put(val diviner.Value, index int) {
-	val = m.intern(val)
-	m.values[val] = index
-}
-
-// Get retrieves the index of the provided value.
-func (m *valueMap) Get(val diviner.Value) (index int, ok bool) {
-	val = m.intern(val)
-	index, ok = m.values[val]
-	return
-}
-
-// intern canonicalizes the representation of diviner values.
-// TODO(marius): implement a hash map for diviner values.
-// TODO(marius): this is slow for large cardinality lists.
-func (m *valueMap) intern(v diviner.Value) diviner.Value {
-	if v.Kind() != diviner.Seq {
-		return v
-	}
-	for _, list := range m.lists {
-		if !v.Less(list) && !list.Less(v) {
-			return list
-		}
-	}
-	m.lists = append(m.lists, v)
-	return v
 }

@@ -6,6 +6,7 @@ package oracle_test
 
 import (
 	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/grailbio/diviner"
@@ -27,7 +28,7 @@ func TestGridSearch(t *testing.T) {
 	if got, want := len(values), 3*3*2; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
-	diviner.SortValues(values)
+	sortValues(values)
 	var index int
 	for i, x := range []float64{0, 1, 2} {
 		for j, y := range []float64{10, 20, 30} {
@@ -67,7 +68,7 @@ func TestGridSearch(t *testing.T) {
 	if got, want := len(next), 3; got != want {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	diviner.SortValues(next)
+	sortValues(next)
 	for i, vs := range next {
 		if got, want := vs, values[i]; !reflect.DeepEqual(got, want) {
 			t.Errorf("got %v, want %v", got, want)
@@ -87,7 +88,7 @@ func TestGridSearchRange(t *testing.T) {
 	if got, want := len(values), 100; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
-	diviner.SortValues(values)
+	sortValues(values)
 	for i, v := range values {
 		if got, want := len(v), 1; got != want {
 			t.Errorf("got %v, want %v", got, want)
@@ -101,7 +102,7 @@ func TestGridSearchRange(t *testing.T) {
 
 func TestGridSearchList(t *testing.T) {
 	params := diviner.Params{
-		"x": diviner.NewDiscrete(&diviner.List{}, &diviner.List{diviner.Int(1)}),
+		"x": diviner.NewDiscrete(diviner.List{}, diviner.List{diviner.Int(1)}),
 	}
 	var search oracle.GridSearch
 	values, err := search.Next(nil, params, diviner.Objective{}, -1)
@@ -111,7 +112,7 @@ func TestGridSearchList(t *testing.T) {
 	if got, want := len(values), 2; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
-	diviner.SortValues(values)
+	sortValues(values)
 	if got, want := values[0]["x"].Len(), 0; got != want {
 		t.Errorf("got %v, want %v", got, want)
 	}
@@ -129,4 +130,28 @@ func TestGridSearchList(t *testing.T) {
 	if got, want := values[0]["x"].Len(), 1; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
+}
+
+// sortValues sorts the provided set of values by keys. It assumes
+// that all of the values have exactly the same sets of keys.
+func sortValues(vs []diviner.Values) {
+	if len(vs) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(vs[0]))
+	for key := range vs[0] {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	sort.SliceStable(vs, func(i, j int) bool {
+		for _, k := range keys {
+			switch {
+			case vs[i][k].Less(vs[j][k]):
+				return true
+			case vs[j][k].Less(vs[i][k]):
+				return false
+			}
+		}
+		return false
+	})
 }

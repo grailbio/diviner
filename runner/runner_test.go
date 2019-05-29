@@ -55,8 +55,9 @@ func TestRunner(t *testing.T) {
 
 	datasetFile := filepath.Join(dir, "dataset")
 	dataset := diviner.Dataset{
-		Name:    "testset",
-		Systems: systems,
+		Name:       "testset",
+		IfNotExist: datasetFile,
+		Systems:    systems,
 		Script: fmt.Sprintf(`
 			# Should run only once.
 			test -f %s && exit 1

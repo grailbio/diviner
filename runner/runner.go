@@ -481,16 +481,16 @@ func (r *Runner) allocate(ctx context.Context, sys []*diviner.System) (*worker, 
 
 // Dataset returns a named dataset as managed by this runner.
 // If this is the first time the dataset is encountered, then the
-// runner also begins dataset processing.
+// runner also begins dataset processing. Datasets are de-duped
+// based on their IfNotExist url, but only if that URL is nonempty.
 func (r *Runner) dataset(ctx context.Context, dataset diviner.Dataset) *dataset {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	d, ok := r.datasets[dataset.Name]
-	if ok {
+	if d, ok := r.datasets[dataset.IfNotExist]; dataset.IfNotExist != "" && ok {
 		return d
 	}
-	d = newDataset(dataset)
-	r.datasets[d.Name] = d
+	d := newDataset(dataset)
+	r.datasets[d.IfNotExist] = d
 	go d.Do(ctx, r)
 	return d
 }

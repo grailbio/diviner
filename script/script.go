@@ -48,6 +48,7 @@
 //                    a single system or a list of systems. In the latter case,
 //                    the run will use any one of systems can allocate resources.
 //		- if_not_exist: a URL that is checked for conditional execution;
+//		                dataset invocations are de-duped based on this URL.
 //		- local_files:  a list of local files that must be made available
 // 		                in the script's execution environment;
 //		- script:       the script that is run to produce the dataset.

@@ -47,6 +47,21 @@ func (p Params) Sorted() []NamedParam {
 	return sorted
 }
 
+// IsValid returns whether the given set of values are a valid assignment
+// of exactly the parameters in this Params.
+func (p Params) IsValid(values Values) bool {
+	if len(p) != len(values) {
+		return false
+	}
+	for name, v := range values {
+		param, ok := p[name]
+		if !ok || !param.IsValid(v) {
+			return false
+		}
+	}
+	return true
+}
+
 // A Metric is a single, named metric.
 type Metric struct {
 	Name  string

@@ -63,3 +63,78 @@ func TestRange(t *testing.T) {
 		t.Errorf("mean %f out of range", mean)
 	}
 }
+
+func TestIsValid(t *testing.T) {
+	tests := []struct {
+		params diviner.Params
+		values diviner.Values
+		result bool
+	}{
+		{
+			params: diviner.Params{
+				"a": diviner.NewDiscrete(diviner.Float(0), diviner.Float(1), diviner.Float(2)),
+				"b": diviner.NewDiscrete(diviner.Int(7), diviner.Int(8)),
+			},
+			values: diviner.Values{
+				"a": diviner.Float(1),
+			},
+			result: false,
+		},
+		{
+			params: diviner.Params{
+				"a": diviner.NewDiscrete(diviner.Float(0), diviner.Float(1), diviner.Float(2)),
+				"b": diviner.NewDiscrete(diviner.Int(7), diviner.Int(8)),
+			},
+			values: diviner.Values{
+				"a": diviner.Float(1),
+				"b": diviner.Int(7),
+			},
+			result: true,
+		},
+		{
+			params: diviner.Params{
+				"a": diviner.NewDiscrete(diviner.Float(0), diviner.Float(1), diviner.Float(2)),
+				"b": diviner.NewDiscrete(diviner.Int(7), diviner.Int(8)),
+			},
+			values: diviner.Values{
+				"a": diviner.Float(1),
+				"b": diviner.Int(9),
+			},
+			result: false,
+		},
+		{
+			params: diviner.Params{
+				"a": diviner.NewRange(diviner.Int(7), diviner.Int(100)),
+			},
+			values: diviner.Values{
+				"a": diviner.Int(99),
+			},
+			result: true,
+		},
+		{
+			params: diviner.Params{
+				"a": diviner.NewRange(diviner.Int(7), diviner.Int(100)),
+			},
+			values: diviner.Values{
+				"a": diviner.Int(100),
+			},
+			result: false,
+		},
+		{
+			params: diviner.Params{
+				"a": diviner.NewRange(diviner.Int(7), diviner.Int(100)),
+			},
+			values: diviner.Values{
+				"a": diviner.Int(99),
+				"b": diviner.Int(0),
+			},
+			result: false,
+		},
+	}
+
+	for _, test := range tests {
+		if test.params.IsValid(test.values) != test.result {
+			t.Errorf("Wrong result for %v, %v: want %v", test.params, test.values, test.result)
+		}
+	}
+}

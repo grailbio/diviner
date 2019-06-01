@@ -173,7 +173,7 @@ func TestReplicates(t *testing.T) {
 		}
 	}
 
-	trials, err := diviner.Trials(ctx, db, study)
+	trials, err := diviner.Trials(ctx, db, study, diviner.Success)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestReplicatesError(t *testing.T) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 
-	trials, err := diviner.Trials(ctx, db, study)
+	trials, err := diviner.Trials(ctx, db, study, diviner.Success)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestReplicatesError(t *testing.T) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 
-	trials, err = diviner.Trials(ctx, db, study)
+	trials, err = diviner.Trials(ctx, db, study, diviner.Success)
 	if err != nil {
 		log.Fatal(err)
 	}

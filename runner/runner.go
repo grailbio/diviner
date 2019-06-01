@@ -397,7 +397,7 @@ loop:
 }
 
 func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (done bool, err error) {
-	trials, err := diviner.Trials(ctx, r.db, study)
+	trials, err := diviner.Trials(ctx, r.db, study, diviner.Success|diviner.Pending)
 	if err != nil {
 		return false, err
 	}

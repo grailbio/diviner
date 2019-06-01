@@ -158,17 +158,18 @@ type Database interface {
 // value set. The returned map maps value sets to these composite
 // trials.
 //
-// Trial metrics are averaged across successful and pending runs;
-// flags are set on the returned trials to indicate which replicates
-// they comprise and whether any pending results were used.
+// Trial metrics are averaged across runs in the states as indicated
+// by the provided run states; flags are set on the returned trials
+// to indicate which replicates they comprise and whether any pending
+// results were used.
 //
 // TODO(marius): this is a reasonable approach for some metrics, but
 // not for others. We should provide a way for users to (e.g., as
 // part of a study definition) to define their own means of defining
 // composite metrics, e.g., by intepreting metrics from each run, or
 // their outputs directly (e.g., predictions from an evaluation run).
-func Trials(ctx context.Context, db Database, study Study) (*Map, error) {
-	runs, err := db.ListRuns(ctx, study.Name, Success|Pending, time.Time{})
+func Trials(ctx context.Context, db Database, study Study, states RunState) (*Map, error) {
+	runs, err := db.ListRuns(ctx, study.Name, states, time.Time{})
 	if err != nil && err != ErrNotExist {
 		return nil, err
 	}

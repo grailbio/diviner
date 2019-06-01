@@ -966,7 +966,7 @@ specifying regular expressions for matching them via the flags
 		trials   []trial
 	)
 	err := traverser.Each(len(studies), func(i int) error {
-		t, err := diviner.Trials(ctx, db, studies[i])
+		t, err := diviner.Trials(ctx, db, studies[i], diviner.Success)
 		if err != nil {
 			return err
 		}

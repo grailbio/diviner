@@ -5,21 +5,21 @@
 package diviner
 
 import (
-	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"hash"
 	"hash/fnv"
-	"io"
-	"math"
 	"sort"
 	"strings"
+
+	"github.com/grailbio/base/writehash"
 )
 
 func init() {
 	gob.Register(Float(0))
 	gob.Register(Int(0))
 	gob.Register(String(""))
+	gob.Register(Bool(false))
 	gob.Register(List{})
 	gob.Register(&Map{})
 }
@@ -33,6 +33,7 @@ const (
 	Str
 	Seq
 	ValueDict
+	Boolean
 )
 
 func (k Kind) String() string {
@@ -47,6 +48,8 @@ func (k Kind) String() string {
 		return "seq"
 	case ValueDict:
 		return "valuedict"
+	case Boolean:
+		return "boolean"
 	default:
 		panic(k)
 	}
@@ -78,6 +81,9 @@ type Value interface {
 	// Str returns the string of string-typed values.
 	Str() string
 
+	// Bool returns the boolean of boolean-typed values.
+	Bool() bool
+
 	// Len returns the length of a sequence value.
 	Len() int
 
@@ -101,6 +107,8 @@ func Zero(kind Kind) Value {
 		return String("")
 	case ValueDict:
 		return new(Values)
+	case Boolean:
+		return Bool(false)
 	case Seq:
 		return new(List)
 	}
@@ -136,6 +144,8 @@ func (Int) Str() string { panic("Str on Int") }
 // Int implements Value.
 func (v Int) Int() int64 { return int64(v) }
 
+func (Int) Bool() bool { panic("Bool on Int") }
+
 func (Int) Len() int                            { panic("Len on Int") }
 func (Int) Index(int) Value                     { panic("Index on Int") }
 func (Int) Put(key string, value Value)         { panic("Put on Int") }
@@ -143,9 +153,7 @@ func (Int) Get(key string) Value                { panic("Get on Int") }
 func (Int) Range(func(key string, value Value)) { panic("Range on Int") }
 
 func (v Int) Hash(h hash.Hash) {
-	var b [8]byte
-	binary.LittleEndian.PutUint64(b[:], uint64(v.Int()))
-	h.Write(b[:])
+	writehash.Uint64(h, uint64(v))
 }
 
 // Float is a float-typed value.
@@ -178,6 +186,8 @@ func (Float) Str() string { panic("Str on Float") }
 // Int implements Value.
 func (Float) Int() int64 { panic("Int on Float") }
 
+func (Float) Bool() bool { panic("Bool on Float") }
+
 func (Float) Len() int                            { panic("Len on Float") }
 func (Float) Index(int) Value                     { panic("Index on Float") }
 func (Float) Put(key string, value Value)         { panic("Put on Float") }
@@ -185,9 +195,7 @@ func (Float) Get(key string) Value                { panic("Get on Float") }
 func (Float) Range(func(key string, value Value)) { panic("Range on Float") }
 
 func (v Float) Hash(h hash.Hash) {
-	var b [8]byte
-	binary.LittleEndian.PutUint64(b[:], math.Float64bits(v.Float()))
-	h.Write(b[:])
+	writehash.Float64(h, v.Float())
 }
 
 // String is a string-typed value.
@@ -217,6 +225,8 @@ func (String) Float() float64 { panic("Float on String") }
 // Int implements Value.
 func (String) Int() int64 { panic("Int on String") }
 
+func (String) Bool() bool { panic("Bool on String") }
+
 // Str implements Value.
 func (v String) Str() string { return string(v) }
 
@@ -227,7 +237,50 @@ func (String) Get(key string) Value                { panic("Get on String") }
 func (String) Range(func(key string, value Value)) { panic("Range on String") }
 
 func (v String) Hash(h hash.Hash) {
-	io.WriteString(h, v.Str())
+	writehash.String(h, v.Str())
+}
+
+// Bool is a boolean-typed value.
+type Bool bool
+
+// String implements Value.
+func (v Bool) String() string { return fmt.Sprint(bool(v)) }
+
+// Kind implements Value.
+func (Bool) Kind() Kind { return Boolean }
+
+func (v Bool) Equal(w Value) bool {
+	if w.Kind() != Boolean {
+		return false
+	}
+	return v.Bool() == w.Bool()
+}
+
+// Less implements Value.
+func (v Bool) Less(w Value) bool {
+	return !v.Bool() && w.Bool()
+}
+
+// Bool implements Value.
+func (v Bool) Float() float64 { panic("Float on Bool") }
+
+// Str implements Value.
+func (Bool) Str() string { panic("Str on Bool") }
+
+// Int implements Value.
+func (Bool) Int() int64 { panic("Int on Bool") }
+
+// Bool implements Value.
+func (v Bool) Bool() bool { return bool(v) }
+
+func (Bool) Len() int                            { panic("Len on Bool") }
+func (Bool) Index(int) Value                     { panic("Index on Bool") }
+func (Bool) Put(key string, value Value)         { panic("Put on Bool") }
+func (Bool) Get(key string) Value                { panic("Get on Bool") }
+func (Bool) Range(func(key string, value Value)) { panic("Range on Bool") }
+
+func (v Bool) Hash(h hash.Hash) {
+	writehash.Bool(h, bool(v))
 }
 
 // List is a list-typed value.
@@ -283,6 +336,8 @@ func (List) Int() int64 { panic("Int on List") }
 
 // Str implements Value.
 func (List) Str() string { panic("Str on List") }
+
+func (List) Bool() bool { panic("Bool on List") }
 
 // Len returns the length of the list.
 func (l List) Len() int { return len(l) }
@@ -349,6 +404,7 @@ func (Values) Less(Value) bool { panic("Less on Values") }
 func (Values) Float() float64  { panic("Float on Values") }
 func (Values) Int() int64      { panic("Int on Values") }
 func (Values) Str() string     { panic("Str on Values") }
+func (Values) Bool() bool      { panic("Bool on Values") }
 
 func (v Values) Len() int { return len(v) }
 

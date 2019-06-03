@@ -686,6 +686,8 @@ func starlark2diviner(val starlark.Value) diviner.Value {
 			return nil
 		}
 		return diviner.Int(v64)
+	case starlark.Bool:
+		return diviner.Bool(bool(val))
 	case *starlark.List:
 		list := make(diviner.List, val.Len())
 		for i := range list {
@@ -710,6 +712,8 @@ func diviner2starlark(val diviner.Value) starlark.Value {
 		return starlark.MakeInt64(val.Int())
 	case diviner.String, *diviner.String:
 		return starlark.String(val.String())
+	case diviner.Bool, *diviner.Bool:
+		return starlark.Bool(val.Bool())
 	case *diviner.List:
 		elems := make([]starlark.Value, val.Len())
 		for i := range elems {

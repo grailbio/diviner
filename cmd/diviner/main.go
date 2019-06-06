@@ -138,9 +138,12 @@
 //	diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...
 //		Display a leaderboard of all trails in the provided studies. The leaderboard
 //		uses the studies' shared objective unless overridden.
-//	diviner run [-rounds M] [-trials N] script.dv [studies]
+//	diviner run [-rounds M] [-trials N] [-stream] script.dv [studies]
 //		Run M rounds of N trials of the studies matching regexp.
-//		All studies are run if the regexp is omitted.
+//		All studies are run if the regexp is omitted. If -stream is
+//		specified, the study is run in streaming mode: N trials are
+//		maintained in parallel; new points are queried from the
+// 		study's oracle as needed.
 //	diviner script script.dv study [-param=value...]
 //		Render a bash script implementing the study from script.dv
 //		with the provided parameters.
@@ -179,11 +182,13 @@
 // providing regular expressions to the -values and -metrics flags
 // respectively.
 //
-// diviner run [-rounds M] [-trials N] script.dv [studies] performs
-// trials as defined in the provided script. M rounds of N trials
-// each are performed for each of the studies that matches the
+// diviner run [-rounds M] [-trials N] [-stream] script.dv [studies]
+// performs trials as defined in the provided script. M rounds of N
+// trials each are performed for each of the studies that matches the
 // argument. If no studies are specified, all studies are run
-// concurrently.
+// concurrently. If -stream is specified, the study is run in
+// streaming mode: N trials are maintained in parallel; new points
+// are queried from the study's oracle as needed.
 //
 // diviner run script.dv runs... re-runs one or more runs from
 // studies defined in the provided script. Specifically: parameter
@@ -215,6 +220,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/signal"
 	"regexp"
 	"sort"
 	"strconv"
@@ -261,9 +267,11 @@ func usage() {
 	diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...
 		Display a leaderboard of all trails in the provided studies. The leaderboard
 		uses the studies' shared objective unless overridden.
-	diviner run [-rounds M] [-trials N] script.dv [studies]
-		Run M rounds of N trials of the studies matching regexp.
-		All studies are run if the regexp is omitted.
+	diviner run [-rounds M] [-trials N] [-stream] script.dv [studies]
+		Run M rounds of N trials of the studies matching regexp. All
+		studies are run if the regexp is omitted. If -stream is specified,
+		the study is run in streaming mode: N trials are maintained in
+		parallel; new points are queried from the study's oracle as needed.
 	diviner script script.dv study [-param=value...]
 		Render a bash script containing functions implementing a study,
 		including its datasets.
@@ -661,16 +669,21 @@ column; missing values are denoted by "NA".`)
 func run(db diviner.Database, args []string) {
 	var (
 		flags     = flag.NewFlagSet("run", flag.ExitOnError)
-		ntrials   = flags.Int("trials", 1, "number of trials to run in each round")
+		ntrials   = flags.Int("trials", 1, "number of trials to run in each round, or parallelism when streaming")
+		stream    = flags.Bool("stream", false, "perform a streaming study")
 		nrounds   = flags.Int("rounds", 1, "number of rounds to run")
 		replicate = flags.Int("replicate", 0, "replicate to re-run")
 	)
 	flags.Usage = func() {
-		fmt.Fprintln(os.Stderr, `usage: diviner run [-rounds n] [-trials n] script.dv [studies]
+		fmt.Fprintln(os.Stderr, `usage: diviner run [-rounds n] [-trials n] [-stream] script.dv [studies]
 
 Run performs trials for the studies as specified in the given diviner
 script. The rounds for each matching study is run concurrently; each
 round runs up to the given number of trials at the same time.
+
+If -stream is given, the study is run in streaming mode, maintaining
+n concurrent trials at all times, querying the underlying oracle for 
+new points as needed.
 
 The run command runs a diagnostic http server where individual
 run status may be obtained. If a shared database is used, this may
@@ -730,12 +743,21 @@ If no studies are specified, all defined studies are run concurrently.`)
 		names := make([]string, len(studies))
 		for i, study := range studies {
 			names[i] = study.Name
+			if study.Oracle == nil {
+				studies[i].Oracle = &oracle.GridSearch{}
+			}
 		}
 		log.Printf("performing trials for studies: %s", strings.Join(names, ", "))
 
 		var nerr uint32
 		_ = traverser.Each(len(studies), func(i int) error {
-			if err := runStudy(ctx, runner, studies[i], *ntrials, *nrounds); err != nil {
+			var err error
+			if *stream {
+				err = streamStudy(ctx, runner, studies[i], *ntrials)
+			} else {
+				err = runStudy(ctx, runner, studies[i], *ntrials, *nrounds)
+			}
+			if err != nil {
 				atomic.AddUint32(&nerr, 1)
 				log.Error.Printf("study %v failed: %v", studies[i], err)
 			}
@@ -778,9 +800,6 @@ If no studies are specified, all defined studies are run concurrently.`)
 }
 
 func runStudy(ctx context.Context, runner *runner.Runner, study diviner.Study, ntrials, nrounds int) error {
-	if study.Oracle == nil {
-		study.Oracle = &oracle.GridSearch{}
-	}
 	var (
 		round int
 		done  bool
@@ -797,6 +816,33 @@ func runStudy(ctx context.Context, runner *runner.Runner, study diviner.Study, n
 		log.Printf("%s: study complete after %d rounds", study.Name, round)
 	}
 	return nil
+}
+
+func streamStudy(ctx context.Context, runner *runner.Runner, study diviner.Study, nparallel int) error {
+	streamer := runner.Stream(ctx, study, nparallel)
+	go func() {
+		var (
+			c             = make(chan os.Signal, 1)
+			lastInterrupt time.Time
+			stopped       bool
+		)
+		signal.Notify(c, os.Interrupt)
+		// Note that this won't do the right thing when using local
+		// bigmachines, since these are launched via os.Exec, and
+		// the signal will be propagated accordingly.
+		for range c {
+			if time.Since(lastInterrupt) < time.Second {
+				os.Exit(1)
+			}
+			if !stopped {
+				streamer.Stop()
+				stopped = true
+				log.Printf("stopping streaming study; waiting for ongoing trials to complete")
+			}
+			lastInterrupt = time.Now()
+		}
+	}()
+	return streamer.Wait()
 }
 
 func showScript(db diviner.Database, args []string) {

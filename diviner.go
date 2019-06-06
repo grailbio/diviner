@@ -165,6 +165,34 @@ func (t Trial) Equal(u Trial) bool {
 	return t.Values.Equal(u.Values) && t.Metrics.Equal(u.Metrics)
 }
 
+// ReplicatedTrials constructs a single trial from the provided
+// trials. The composite trial represents each replicate present in
+// the provided replicates. Metrics are averaged.
+func ReplicatedTrial(replicates []Trial) Trial {
+	if len(replicates) == 0 {
+		panic("no replicates provided")
+	}
+	var (
+		counts = make(map[string]int)
+		trial  = Trial{Values: replicates[0].Values, Metrics: make(Metrics)}
+	)
+	for _, rep := range replicates {
+		if trial.Replicates&rep.Replicates != 0 {
+			// TODO(marius): pick "best" replicate?
+			continue
+		}
+		for name, value := range rep.Metrics {
+			counts[name]++
+			n := float64(counts[name])
+			trial.Metrics[name] = value/n + trial.Metrics[name]*(n-1)/n
+		}
+		trial.Pending = trial.Pending || rep.Pending
+		trial.Replicates |= rep.Replicates
+		trial.Runs = append(trial.Runs, rep.Runs...)
+	}
+	return trial
+}
+
 // Direction is the direction of the objective.
 type Direction int
 

@@ -184,27 +184,8 @@ func Trials(ctx context.Context, db Database, study Study, states RunState) (*Ma
 	}
 	trials := NewMap()
 	replicates.Range(func(key Value, v interface{}) {
-		var (
-			reps   = v.([]Trial)
-			counts = make(map[string]int)
-			values = key.(Values)
-			trial  = Trial{Values: values, Metrics: make(Metrics)}
-		)
-		for _, rep := range reps {
-			if trial.Replicates&rep.Replicates != 0 {
-				// TODO(marius): pick "best" replicate?
-				continue
-			}
-			for name, value := range rep.Metrics {
-				counts[name]++
-				n := float64(counts[name])
-				trial.Metrics[name] = value/n + trial.Metrics[name]*(n-1)/n
-			}
-			trial.Pending = trial.Pending || rep.Pending
-			trial.Replicates |= rep.Replicates
-			trial.Runs = append(trial.Runs, rep.Runs...)
-		}
-		trials.Put(&values, trial)
+		values := key.(Values)
+		trials.Put(&values, ReplicatedTrial(v.([]Trial)))
 	})
 	return trials, nil
 }

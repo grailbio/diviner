@@ -47,7 +47,7 @@ func TestStream(t *testing.T) {
 		Params: diviner.Params{
 			"param": diviner.NewRange(diviner.Int(0), diviner.Int(N)),
 		},
-		Acquire: func(values diviner.Values) (diviner.Metrics, error) {
+		Acquire: func(values diviner.Values, replicate int, id string) (diviner.Metrics, error) {
 			enterc <- struct{}{}
 			<-exitc
 			return diviner.Metrics{"acc": float64(values["param"].Int()) * 0.87}, nil

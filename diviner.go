@@ -392,8 +392,8 @@ type Study struct {
 
 	// Acquire returns the metrics associated with the set of
 	// parameter values that are provided. It is used to support
-	// (Go) native trials.
-	Acquire func(vals Values) (Metrics, error) `json:"-"`
+	// (Go) native trials. Arguments are as in Run.
+	Acquire func(vals Values, replicate int, id string) (Metrics, error) `json:"-"`
 }
 
 // String returns a textual description of the study.

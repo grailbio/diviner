@@ -412,7 +412,7 @@ func TestRunnerGo(t *testing.T) {
 		Params: diviner.Params{
 			"param": diviner.NewDiscrete(diviner.Int(0), diviner.Int(1), diviner.Int(2)),
 		},
-		Acquire: func(values diviner.Values) (diviner.Metrics, error) {
+		Acquire: func(values diviner.Values, replicate int, id string) (diviner.Metrics, error) {
 			return diviner.Metrics{"acc": float64(values["param"].Int()) * 0.87}, nil
 		},
 		Objective: diviner.Objective{diviner.Maximize, "acc"},

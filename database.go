@@ -7,6 +7,7 @@ package diviner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 )
@@ -86,6 +87,11 @@ type Run struct {
 	// TODO(marius): include timestamps for these, or some other
 	// reference (e.g., runtime).
 	Metrics []Metrics
+}
+
+// ID returns this run's identifier.
+func (r Run) ID() string {
+	return fmt.Sprintf("%s:%d", r.Study, r.Seq)
 }
 
 // Trial returns the Trial represented by this run.

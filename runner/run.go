@@ -84,7 +84,7 @@ type run struct {
 	Config diviner.RunConfig
 
 	// Acquire is used to directly invoke Go code to acquire metrics.
-	Acquire func(val diviner.Values) (diviner.Metrics, error)
+	Acquire func(vals diviner.Values, replicate int, id string) (diviner.Metrics, error)
 
 	count int
 
@@ -248,7 +248,7 @@ func (r *run) doAcquire(ctx context.Context, runner *Runner) {
 	r.mu.Lock()
 	r.start = time.Now()
 	r.mu.Unlock()
-	metrics, err := r.Acquire(r.Values)
+	metrics, err := r.Acquire(r.Values, r.Run.Replicate, r.Run.ID())
 	elapsed := time.Since(r.start)
 	if err != nil {
 		r.errorf("run failed after %s: %v", elapsed, err)

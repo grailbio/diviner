@@ -20,6 +20,11 @@ import (
 	"github.com/grailbio/diviner"
 )
 
+// Logger is the default logger used for informational messages by
+// package runner. By default it is log.Debug, appropriate for library
+// use.
+var Logger = log.Debug
+
 var (
 	metricsPrefix = []byte("METRICS: ")
 	divinerPrefix = []byte("DIVINER: ")
@@ -208,7 +213,7 @@ func (r *run) Do(ctx context.Context, runner *Runner) {
 			} else if dur, err := time.ParseDuration(strings.TrimPrefix(line, "keepalive=")); err != nil {
 				log.Error.Printf("%s:%d: error parsing directive %s: %v", r.Run.Study, r.Run.Seq, line, err)
 			} else {
-				log.Printf("%s:%d: keepalive: %s", r.Run.Study, r.Run.Seq, dur)
+				Logger.Printf("%s:%d: keepalive: %s", r.Run.Study, r.Run.Seq, dur)
 				alarm.Reset(dur)
 			}
 		} else {

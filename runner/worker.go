@@ -133,7 +133,7 @@ func (w *worker) Start(ctx context.Context) {
 	}
 	if w.err == nil {
 		allocated.Add(1)
-		log.Printf("allocated machine %s in %s", w.Addr, time.Since(start))
+		Logger.Printf("allocated machine %s in %s", w.Addr, time.Since(start))
 	}
 }
 

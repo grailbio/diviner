@@ -309,6 +309,8 @@ func main() {
 	log.AddFlags()
 	log.SetFlags(log.Ldate | log.Ltime)
 
+	runner.Logger = log.Info
+
 	databaseConfig := flag.String("db", "dynamodb,diviner-patchcnn", "database table where state is stored")
 	flag.Usage = usage
 	flag.Parse()
@@ -682,7 +684,7 @@ script. The rounds for each matching study is run concurrently; each
 round runs up to the given number of trials at the same time.
 
 If -stream is given, the study is run in streaming mode, maintaining
-n concurrent trials at all times, querying the underlying oracle for 
+n concurrent trials at all times, querying the underlying oracle for
 new points as needed.
 
 The run command runs a diagnostic http server where individual

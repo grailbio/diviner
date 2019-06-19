@@ -8,7 +8,6 @@ import (
 	"context"
 	"sync"
 
-	"github.com/grailbio/base/log"
 	"github.com/grailbio/diviner"
 	"golang.org/x/sync/errgroup"
 )
@@ -141,7 +140,7 @@ func (s *Streamer) do(ctx context.Context) error {
 		}
 
 		if n := s.nparallel - npending; !done && len(valueq) == 0 && n > 0 {
-			log.Printf("%s: requesting %d new points from oracle from %d trials (streaming)", s.study.Name, n, len(trials))
+			Logger.Printf("%s: requesting %d new points from oracle from %d trials (streaming)", s.study.Name, n, len(trials))
 			// TODO(marius): it may be useful to request more points
 			// than we can immediately fill, especially for expensive oracles.
 			// Alternatively, we could make oracle stateful.

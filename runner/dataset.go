@@ -46,7 +46,7 @@ func (d *dataset) Do(ctx context.Context, runner *Runner) {
 	// First check if the dataset already exists.
 	if url := d.IfNotExist; url != "" {
 		if stat, err := file.Stat(ctx, url); err == nil {
-			log.Printf("dataset %s: found %s, with modtime %v", d.Name, url, stat.ModTime())
+			Logger.Printf("dataset %s: found %s, with modtime %v", d.Name, url, stat.ModTime())
 			d.setStatus(statusOk)
 			return
 		} else if !errors.Is(errors.NotExist, err) {
@@ -54,7 +54,7 @@ func (d *dataset) Do(ctx context.Context, runner *Runner) {
 			return
 		}
 	}
-	log.Printf("dataset %s: %s not found, start data generation", d.Name, d.IfNotExist)
+	Logger.Printf("dataset %s: %s not found, start data generation", d.Name, d.IfNotExist)
 	w, err := runner.allocate(ctx, d.Systems)
 	if err != nil {
 		d.error(errors.E("dataset: allocate", d.Systems, err))

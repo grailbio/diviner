@@ -221,7 +221,7 @@ outer:
 				for len(sess.Idle) > 0 && time.Since(sess.Idle[0].IdleTime) > idleTime {
 					var w *worker
 					w, sess.Idle = sess.Idle[0], sess.Idle[1:]
-					log.Printf("worker %s idled out from pool", w)
+					Logger.Printf("worker %s idled out from pool", w)
 					if w.Session != sess {
 						panic(w)
 					}
@@ -370,7 +370,7 @@ loop:
 	for ; retries < maxRetries; atomic.AddInt64(&retries, 1) {
 		run.Do(ctx, r)
 		status, message, elapsed := run.Status()
-		log.Printf("run %s: %s %s %s", run, status, message, elapsed)
+		Logger.Printf("run %s: %s %s %s", run, status, message, elapsed)
 		switch status {
 		case statusWaiting, statusRunning:
 			log.Error.Printf("run %s returned with incomplete status %s", run, status)
@@ -401,7 +401,7 @@ func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (d
 	if err != nil {
 		return false, err
 	}
-	log.Printf("%s: requesting new points from oracle from %d trials", study.Name, trials.Len())
+	Logger.Printf("%s: requesting new points from oracle from %d trials", study.Name, trials.Len())
 
 	var complete []diviner.Trial
 	trials.Range(func(_ diviner.Value, v interface{}) {

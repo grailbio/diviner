@@ -76,10 +76,10 @@ func TestParams(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 	params := studies[0].Params
-	if got, want := len(params), 3; got != want {
+	if got, want := len(params), 4; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
-	for _, key := range []string{"learning_rate", "dropout", "list"} {
+	for _, key := range []string{"learning_rate", "dropout", "list", "dict"} {
 		_, ok := params[key]
 		if !ok {
 			t.Fatalf("params did not have key %s", key)
@@ -94,6 +94,19 @@ func TestParams(t *testing.T) {
 	}
 	if got, want := lists[1], (diviner.List{diviner.String("ok"), diviner.Int(1), diviner.Float(0.1)}); !dequal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+
+	dict := params["dict"].Values()
+	if got, want := len(dict), 2; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	s := dict[0].(*diviner.Dict).Sorted()
+	if len(s) != 1 || s[0].Name != "k0" || s[0].String() != "v0" {
+		t.Errorf("bad dict: %+v", s)
+	}
+	s = dict[1].(*diviner.Dict).Sorted()
+	if len(s) != 2 || s[0].Name != "k0" || s[0].String() != "v1" || s[1].Name != "k1" || s[1].String() != "v2" {
+		t.Errorf("bad dict: %+v", s)
 	}
 }
 
@@ -153,6 +166,12 @@ list_value: 1
 list_value: 2
 list_value: 3
 enum_value: HELLO
+dict_value {
+  k0: "v0"
+  k1: 100
+  k2: 1
+  k2: 2
+}
 `; got != want {
 		t.Errorf("got %v, want %v", got, want)
 	}

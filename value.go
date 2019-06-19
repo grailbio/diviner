@@ -369,6 +369,9 @@ type NamedValue struct {
 // compatibility (by way of gob) forces our hand here.
 type Values map[string]Value
 
+// Dict is a Value that represents a map from string to a Value.
+type Dict = Values
+
 // String returns a (stable) textual description of the value set.
 func (v Values) String() string {
 	elems := make([]string, v.Len())

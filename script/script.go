@@ -639,6 +639,66 @@ func (v enumValue) Hash() (uint32, error) {
 	return starlark.String(v).Hash()
 }
 
+func dictKey(v starlark.Value) (string, error) {
+	keyValue, ok := v.(starlark.String)
+	if !ok {
+		return "", fmt.Errorf("invalid key %s: keys must be string typed, not %s", v.String(), v.Type())
+	}
+	return string(keyValue), nil
+}
+
+func valueToProto(buf *strings.Builder, v starlark.Value, indent string) error {
+	switch val := v.(type) {
+	case *starlark.List:
+		panic(v)
+	case *starlark.Dict:
+		buf.WriteString(indent + "{\n")
+		for _, kv := range val.Items() {
+			subkey, err := dictKey(kv[0])
+			if err != nil {
+				return err
+			}
+			if err := keyValueToProto(buf, subkey, kv[1], indent+"  "); err != nil {
+				return err
+			}
+		}
+		buf.WriteString("}\n")
+	default:
+		fmt.Fprintf(buf, "%v", val)
+	}
+	return nil
+}
+
+func keyValueToProto(buf *strings.Builder, key string, v starlark.Value, indent string) error {
+	switch val := v.(type) {
+	case *starlark.List:
+		for i := 0; i < val.Len(); i++ {
+			if err := keyValueToProto(buf, key, val.Index(i), indent); err != nil {
+				return err
+			}
+		}
+	case *starlark.Dict:
+		buf.WriteString(indent + key + " {\n")
+		for _, kv := range val.Items() {
+			subkey, err := dictKey(kv[0])
+			if err != nil {
+				return err
+			}
+			if err := keyValueToProto(buf, subkey, kv[1], indent+"  "); err != nil {
+				return err
+			}
+		}
+		buf.WriteString(indent + "}\n")
+	default:
+		buf.WriteString(indent + key + ": ")
+		if err := valueToProto(buf, v, indent); err != nil {
+			return err
+		}
+		buf.WriteString("\n")
+	}
+	return nil
+}
+
 func makeToProto(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var (
 		dict  = new(starlark.Dict)
@@ -654,19 +714,12 @@ func makeToProto(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 	}
 	var buf strings.Builder
 	for _, kv := range dict.Items() {
-		keyValue, ok := kv[0].(starlark.String)
-		if !ok {
-			return nil, fmt.Errorf("invalid key %s: keys must be string typed, not %s", kv[0].String(), kv[0].Type())
+		key, err := dictKey(kv[0])
+		if err != nil {
+			return nil, err
 		}
-		key := string(keyValue)
-		switch val := kv[1].(type) {
-		case *starlark.List:
-			for i := 0; i < val.Len(); i++ {
-				fmt.Fprintf(&buf, "%s: %v\n", key, val.Index(i))
-
-			}
-		default:
-			fmt.Fprintf(&buf, "%s: %v\n", key, val)
+		if err := keyValueToProto(&buf, key, kv[1], ""); err != nil {
+			return nil, err
 		}
 	}
 	return starlark.String(buf.String()), nil
@@ -697,6 +750,20 @@ func starlark2diviner(val starlark.Value) diviner.Value {
 			}
 		}
 		return &list
+	case *starlark.Dict:
+		dict := make(diviner.Dict, val.Len())
+		for _, kv := range val.Items() {
+			subkey, err := dictKey(kv[0])
+			if err != nil {
+				return nil
+			}
+			subval := starlark2diviner(kv[1])
+			if subval == nil {
+				return nil
+			}
+			dict[subkey] = subval
+		}
+		return &dict
 	default:
 		return nil
 	}

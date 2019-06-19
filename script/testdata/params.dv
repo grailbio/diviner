@@ -4,7 +4,8 @@ local = localsystem("local")
 def run_simple_model(values):
     return run_config(
         system=local,
-        script="echo %s %s" % (values["learning_rate"], values["dropout"]),
+        script="echo %s %s %s %s" % (values["learning_rate"], values["dropout"],
+                                     values["dict"], values["dict"]["k0"]),
         local_files=["x", "y", "z"],
     )
 
@@ -15,8 +16,8 @@ study(
         "learning_rate": discrete(0.1, 0.2, 0.3),
         "dropout": discrete(0.5, 0.8),
         "list": discrete([1,2], ["ok", 1, 0.1]),
+        "dict": discrete({"k0": "v0"}, {"k0": "v1", "k1": "v2"})
     },
     run=run_simple_model,
     oracle=grid_search,
 )
-

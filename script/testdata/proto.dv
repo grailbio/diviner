@@ -5,12 +5,17 @@ config = {
   "str_value": "hello world",
   "list_value": [1, 2, 3],
   "enum_value": enum_value("HELLO"),
+  "dict_value": {
+      "k0": "v0",
+      "k1": 100,
+      "k2": [1, 2],
+  },
 }
 
 
 study(
     name="to_proto",
     objective=minimize("dummy"),
-    params={"dummy": discrete("dummy")},
+    params= {"dummy": discrete("dummy")},
     run=lambda vs: run_config(system=localsystem("local", 1), script=to_proto(config)),
 )

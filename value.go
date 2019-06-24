@@ -21,6 +21,7 @@ func init() {
 	gob.Register(String(""))
 	gob.Register(Bool(false))
 	gob.Register(List{})
+	gob.Register(Dict{})
 	gob.Register(&Map{})
 }
 

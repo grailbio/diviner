@@ -772,7 +772,7 @@ func starlark2diviner(val starlark.Value) diviner.Value {
 // diviner2starlark translates a Diviner value to a Starlark Value.
 // Nil is returned when the conversion is impossible.
 func diviner2starlark(val diviner.Value) starlark.Value {
-	switch val.(type) {
+	switch v := val.(type) {
 	case diviner.Float, *diviner.Float:
 		return starlark.Float(val.Float())
 	case diviner.Int, *diviner.Int:
@@ -787,6 +787,12 @@ func diviner2starlark(val diviner.Value) starlark.Value {
 			elems[i] = diviner2starlark(val.Index(i))
 		}
 		return starlark.NewList(elems)
+	case *diviner.Dict:
+		dict := &starlark.Dict{}
+		for _, kv := range v.Sorted() {
+			dict.SetKey(starlark.String(kv.Name), diviner2starlark(kv.Value))
+		}
+		return dict
 	default:
 		return nil
 	}

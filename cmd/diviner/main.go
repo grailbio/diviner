@@ -951,6 +951,7 @@ func leaderboard(db diviner.Database, args []string) {
 		valuesRe          = flags.String("values", ".", "comma-separated list of anchored regular expression matching parameter values to display")
 		metricsRe         = flags.String("metrics", "^$", `comma-separated list of anchored regular expression matching additional metrics to display.
 Each regex can be prefixed with '+' or '-'. A regex with '+' (or '-'), when combined with -best, will pick the largest (or smallest) metric from each run.`)
+		expand = flags.Bool("expand", false, "expand replicates into their own trials")
 	)
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, `usage: diviner leaderboard [-objective objective] [-n N] [-values values] [-metrics metrics] studies...
@@ -1014,6 +1015,18 @@ specifying regular expressions for matching them via the flags
 		trials   []trial
 	)
 	err := traverser.Each(len(studies), func(i int) error {
+		if *expand {
+			runs, err := db.ListRuns(ctx, studies[i].Name, diviner.Success, time.Time{})
+			if err != nil && err != diviner.ErrNotExist {
+				return err
+			}
+			trialsMu.Lock()
+			for _, run := range runs {
+				trials = append(trials, trial{run.Trial(), studies[i].Name})
+			}
+			trialsMu.Unlock()
+			return nil
+		}
 		t, err := diviner.Trials(ctx, db, studies[i], diviner.Success)
 		if err != nil {
 			return err
@@ -1100,23 +1113,56 @@ specifying regular expressions for matching them via the flags
 			fmt.Fprint(&tw, "\t"+metric.Metric)
 		}
 	}
+	// Remove values that are the same for every study.
+	// They are not interesting to display. But if we have
+	// just a single trial, then the values may be pertinent.
+	if len(trials) > 1 {
+		var n int
+	dedup:
+		for _, name := range valuesOrdered {
+			var value diviner.Value
+			for i, trial := range trials {
+				if i == 0 {
+					value = trial.Values[name]
+				} else if !trial.Values[name].Equal(value) {
+					valuesOrdered[n] = name
+					n++
+					continue dedup
+				}
+			}
+		}
+		valuesOrdered = valuesOrdered[:n]
+	}
+
 	if len(valuesOrdered) > 0 {
 		fmt.Fprint(&tw, "\t"+strings.Join(valuesOrdered, "\t"))
 	}
 	fmt.Fprintln(&tw)
 	for _, trial := range trials {
 		v := trial.Metrics[objective.Metric]
+		min, max := trial.Range(objective.Metric)
 		sort.Slice(trial.Runs, func(i, j int) bool { return trial.Runs[i].Seq < trial.Runs[j].Seq })
 		seqs := make([]string, len(trial.Runs))
 		for i := range seqs {
 			seqs[i] = fmt.Sprint(trial.Runs[i].Seq)
 		}
-		fmt.Fprintf(&tw, "%s:%s\t%.4g", trial.Study, strings.Join(seqs, ","), v)
+		fmt.Fprintf(&tw, "%s:%s\t", trial.Study, strings.Join(seqs, ","))
+		if min == max {
+			fmt.Fprintf(&tw, "%.3g", v)
+		} else {
+			fmt.Fprintf(&tw, "%.3g [%.3g-%.3g]", v, min, max)
+		}
 		if len(metricsOrdered) > 0 {
 			metrics := make([]string, len(metricsOrdered))
 			for i, metric := range metricsOrdered {
 				if v, ok := trial.Metrics[metric.Metric]; ok {
-					metrics[i] = fmt.Sprintf("%.3g", v)
+					min, max := trial.Range(metric.Metric)
+					log.Print(metric.Metric, ": ", min, max)
+					if min == max {
+						metrics[i] = fmt.Sprintf("%.3g", v)
+					} else {
+						metrics[i] = fmt.Sprintf("%.3g [%.3g-%.3g]", v, min, max)
+					}
 				} else {
 					metrics[i] = "NA"
 				}

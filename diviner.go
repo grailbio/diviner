@@ -14,6 +14,7 @@ package diviner
 import (
 	"errors"
 	"fmt"
+	"math/bits"
 	"sort"
 	"strings"
 
@@ -141,6 +142,31 @@ func (r *Replicates) Clear(rep int) {
 	*r &= ^(1 << uint(rep))
 }
 
+// Count returns the number of replicates defined in the
+// replicate set r.
+func (r Replicates) Count() int {
+	return bits.OnesCount64(uint64(r))
+}
+
+// Next iterates over replicates. It returns the first replicate in
+// the set as well as the replicate set with that replicate removed.
+// -1 is returned if the replicate set is empty.
+//
+// Iteration can thus proceed:
+//
+//	var r Replicates
+//	for r, num := r.Next(); r != -1; r, num = r.Next() {
+//		// Process num
+//	}
+func (r Replicates) Next() (int, Replicates) {
+	next := bits.TrailingZeros64(uint64(r))
+	if next == 64 {
+		return -1, r
+	}
+	r.Clear(next)
+	return next, r
+}
+
 // A Trial is the result of a single run of a black box.
 type Trial struct {
 	// Values is the set of parameter values used for the run.
@@ -148,6 +174,7 @@ type Trial struct {
 	// Metrics is the metrics produced by the black box during
 	// the run.
 	Metrics Metrics
+
 	// Pending indicates whether this is a pending trial. Pending trials
 	// may have incomplete or non-final metrics.
 	Pending bool
@@ -156,6 +183,10 @@ type Trial struct {
 	// comprising this trial. Replicates are stored in a bitset.
 	Replicates Replicates
 
+	// ReplicateMetrics breaks down metrics for each underlying replicate.
+	// Valid only for trials that comprise multiple replicates.
+	ReplicateMetrics map[int]Metrics
+
 	// Runs stores the set of runs comprised by this trial.
 	Runs []Run
 }
@@ -163,6 +194,28 @@ type Trial struct {
 // Equal reports whether the two trials are equal.
 func (t Trial) Equal(u Trial) bool {
 	return t.Values.Equal(u.Values) && t.Metrics.Equal(u.Metrics)
+}
+
+// Range returns the range of the provided metric.
+func (t Trial) Range(name string) (min, max float64) {
+	first := true
+	for _, metrics := range t.ReplicateMetrics {
+		v, ok := metrics[name]
+		if !ok {
+			continue
+		}
+		if first {
+			min, max, first = v, v, false
+		} else if v < min {
+			min = v
+		} else if max < v {
+			max = v
+		}
+	}
+	if first {
+		min, max = t.Metrics[name], t.Metrics[name]
+	}
+	return
 }
 
 // ReplicatedTrials constructs a single trial from the provided
@@ -174,7 +227,7 @@ func ReplicatedTrial(replicates []Trial) Trial {
 	}
 	var (
 		counts = make(map[string]int)
-		trial  = Trial{Values: replicates[0].Values, Metrics: make(Metrics)}
+		trial  = Trial{Values: replicates[0].Values, Metrics: make(Metrics), ReplicateMetrics: make(map[int]Metrics)}
 	)
 	for _, rep := range replicates {
 		if trial.Replicates&rep.Replicates != 0 {
@@ -185,6 +238,9 @@ func ReplicatedTrial(replicates []Trial) Trial {
 			counts[name]++
 			n := float64(counts[name])
 			trial.Metrics[name] = value/n + trial.Metrics[name]*(n-1)/n
+		}
+		for num, r := rep.Replicates.Next(); num != -1; num, r = r.Next() {
+			trial.ReplicateMetrics[num] = rep.Metrics
 		}
 		trial.Pending = trial.Pending || rep.Pending
 		trial.Replicates |= rep.Replicates

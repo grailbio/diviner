@@ -893,7 +893,7 @@ study is always invoked with replicate 0.
 	}
 	var (
 		study  = matched[0]
-		values diviner.Values
+		values = make(diviner.Values)
 		rng    = rand.New(rand.NewSource(0))
 	)
 	flags = flag.NewFlagSet(study.Name, flag.ExitOnError)

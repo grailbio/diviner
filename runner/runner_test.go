@@ -465,7 +465,7 @@ func testScript(t *testing.T, db diviner.Database, retries int, state diviner.Ru
 		}
 	}()
 	study := testStudy(script)
-	run, err := r.Run(ctx, study, nil, 0)
+	run, err := r.Run(ctx, study, nil, 0, 0)
 	cancel()
 	if err != nil {
 		t.Fatal(err)

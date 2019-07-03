@@ -83,7 +83,7 @@ func (s *Streamer) do(ctx context.Context) error {
 					}
 					replicate := replicate
 					g.Go(func() error {
-						run, err := s.runner.Run(ctx, s.study, req.Values, int(replicate))
+						run, err := s.runner.Run(ctx, s.study, req.Values, int(replicate), 0)
 						if err == nil {
 							mu.Lock()
 							runs = append(runs, run)

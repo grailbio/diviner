@@ -300,25 +300,29 @@ outer:
 	return nil
 }
 
-// Run performs a single run with the provided study and values. The
-// run is registered in the runner's configured database, and its
-// status is maintained throughout the course of execution. Run
-// returns when the run is complete (its status may be inspected by
-// methods on diviner.Run); all errors are runtime errors, not errors
-// of the run itself. The run is registered with the runner and will
-// show up in the various introspection facilities. Run
-func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Values, replicate int) (diviner.Run, error) {
+// Run performs a single run with the provided study and values. If seq > 0, an
+// existing run will be resumed.  The run is registered in the runner's
+// configured database, and its status is maintained throughout the course of
+// execution. Run returns when the run is complete (its status may be inspected
+// by methods on diviner.Run); all errors are runtime errors, not errors of the
+// run itself. The run is registered with the runner and will show up in the
+// various introspection facilities. Run
+func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Values, replicate int, seq uint64) (diviner.Run, error) {
 	pctx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	if _, err := r.db.CreateStudyIfNotExist(ctx, study); err != nil {
 		return diviner.Run{}, err
 	}
-	seq, err := r.db.NextSeq(ctx, study.Name)
-	if err != nil {
-		return diviner.Run{}, err
-	}
-	if seq == 0 {
-		return diviner.Run{}, fmt.Errorf("invalid run sequence: %d", seq)
+	resume := (seq > 0)
+	var err error
+	if !resume {
+		seq, err = r.db.NextSeq(ctx, study.Name)
+		if err != nil {
+			return diviner.Run{}, err
+		}
+		if seq == 0 {
+			return diviner.Run{}, fmt.Errorf("invalid run sequence: %d", seq)
+		}
 	}
 	var config diviner.RunConfig
 	if study.Run != nil {
@@ -329,13 +333,17 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 		}
 	}
 	run := new(run)
-	run.Run, err = r.db.InsertRun(ctx, diviner.Run{
-		Study:     study.Name,
-		Seq:       seq,
-		Replicate: replicate,
-		Values:    values,
-		Config:    config,
-	})
+	if resume {
+		run.Run, err = r.db.LookupRun(ctx, study.Name, seq)
+	} else {
+		run.Run, err = r.db.InsertRun(ctx, diviner.Run{
+			Study:     study.Name,
+			Seq:       seq,
+			Replicate: replicate,
+			Values:    values,
+			Config:    config,
+		})
+	}
 	if err != nil {
 		return diviner.Run{}, err
 	}
@@ -441,7 +449,7 @@ func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (d
 			}
 			replicate := replicate
 			g.Go(func() error {
-				run, err := r.Run(ctx, study, vals, int(replicate))
+				run, err := r.Run(ctx, study, vals, int(replicate), 0)
 				if err == nil {
 					mu.Lock()
 					runs = append(runs, run)

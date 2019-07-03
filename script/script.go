@@ -787,7 +787,19 @@ func diviner2starlark(val diviner.Value) starlark.Value {
 			elems[i] = diviner2starlark(val.Index(i))
 		}
 		return starlark.NewList(elems)
+	case diviner.List: // TODO(marius) figure out why this is needed
+		elems := make([]starlark.Value, val.Len())
+		for i := range elems {
+			elems[i] = diviner2starlark(val.Index(i))
+		}
+		return starlark.NewList(elems)
 	case *diviner.Dict:
+		dict := &starlark.Dict{}
+		for _, kv := range v.Sorted() {
+			dict.SetKey(starlark.String(kv.Name), diviner2starlark(kv.Value))
+		}
+		return dict
+	case diviner.Dict: // TODO(marius) figure out why this is needed
 		dict := &starlark.Dict{}
 		for _, kv := range v.Sorted() {
 			dict.SetKey(starlark.String(kv.Name), diviner2starlark(kv.Value))

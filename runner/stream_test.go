@@ -6,7 +6,9 @@ package runner_test
 
 import (
 	"context"
+	"errors"
 	"math/rand"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,7 +86,7 @@ func TestStream(t *testing.T) {
 	}
 
 	// Stop the streamer first to make sure that we properly drain
-	// the remainign runs.
+	// the remaining runs.
 	streamer.Stop()
 	exit(npending)
 	if err := streamer.Wait(); err != nil {
@@ -99,4 +101,85 @@ func TestStream(t *testing.T) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 
+}
+
+func TestStreamError(t *testing.T) {
+	_, db, cleanup := runnerTest(t)
+	defer cleanup()
+	const N = 10
+	var (
+		fail  = true
+		mu    sync.Mutex
+		cond  = sync.NewCond(&mu)
+		count int
+		ids   = make(map[string]bool)
+	)
+	study := diviner.Study{
+		Name: "test",
+		Params: diviner.Params{
+			"param": diviner.NewRange(diviner.Int(0), diviner.Int(N)),
+		},
+		Acquire: func(values diviner.Values, replicate int, id string) (diviner.Metrics, error) {
+			mu.Lock()
+			count++
+			ids[id] = true
+			cond.Signal()
+			mu.Unlock()
+			if fail {
+				return nil, errors.New("failure")
+			}
+			return diviner.Metrics{"acc": float64(values["param"].Int()) * 0.87}, nil
+		},
+		Objective: diviner.Objective{diviner.Maximize, "acc"},
+		Oracle:    new(oracle.GridSearch),
+	}
+
+	r := runner.New(db)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		if err := r.Loop(ctx); err != context.Canceled {
+			t.Fatal(err)
+		}
+	}()
+
+	streamer := r.Stream(ctx, study, 1)
+	mu.Lock()
+	for count == 0 {
+		cond.Wait()
+	}
+	mu.Unlock()
+	streamer.Stop()
+	_ = streamer.Wait()
+
+	trials, err := diviner.Trials(ctx, db, study, diviner.Failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := trials.Len(), 1; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	fail = false
+	streamer = r.Stream(ctx, study, 3)
+	mu.Lock()
+	count = 0
+	for count < N {
+		cond.Wait()
+	}
+	mu.Unlock()
+	streamer.Stop()
+	_ = streamer.Wait()
+
+	if got, want := len(ids), 10; got != want {
+		t.Errorf("got %v, want %v", got, want)
+		t.Log("ids: ", ids)
+	}
+	trials, err = diviner.Trials(ctx, db, study, diviner.Any)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := trials.Len(), N; got != want {
+		t.Errorf("got %v, want %v", got, want)
+	}
 }

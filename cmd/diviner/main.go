@@ -675,10 +675,9 @@ func run(db diviner.Database, args []string) {
 		stream    = flags.Bool("stream", false, "perform a streaming study")
 		nrounds   = flags.Int("rounds", 1, "number of rounds to run")
 		replicate = flags.Int("replicate", 0, "replicate to re-run")
-		resume    = flags.Bool("resume", false, "resume existing runs")
 	)
 	flags.Usage = func() {
-		fmt.Fprintln(os.Stderr, `usage: diviner run [-rounds n] [-trials n] [-stream] [-resumes] cript.dv [studies-or-runs]
+		fmt.Fprintln(os.Stderr, `usage: diviner run [-rounds n] [-trials n] [-stream] script.dv [studies-or-runs]
 
 Run performs trials for the studies as specified in the given diviner
 script. The rounds for each matching study is run concurrently; each
@@ -714,7 +713,7 @@ If no studies are specified, all defined studies are run concurrently.`)
 		if i == 0 {
 			study = run == 0
 		} else if run == 0 != study {
-			fmt.Fprintf(os.Stderr, "%s: cannot mix studies and runs (resume: %v) (args: %v)\n", arg, *resume, args)
+			fmt.Fprintf(os.Stderr, "%s: cannot mix studies and runs (args: %v)\n", arg, args)
 			flags.Usage()
 		}
 	}
@@ -735,10 +734,6 @@ If no studies are specified, all defined studies are run concurrently.`)
 	http.Handle("/", runner)
 
 	if study {
-		if *resume {
-			fmt.Fprintln(os.Stderr, "-resume: list of runs must be given")
-			os.Exit(2)
-		}
 		switch len(args) {
 		case 0: // all studies
 		case 1:
@@ -792,14 +787,7 @@ If no studies are specified, all defined studies are run concurrently.`)
 		}
 		err = traverse.Each(len(runs), func(i int) (err error) {
 			log.Printf("repeating run %s", args[i])
-			var seq uint64
-			if *resume {
-				_, seq = splitName(args[i])
-				if seq == 0 {
-					log.Panicf("invalid sequence number 0: %s", args[i])
-				}
-			}
-			runs[i], err = runner.Run(ctx, runsStudy[i], runs[i].Values, *replicate, seq)
+			runs[i], err = runner.Run(ctx, runsStudy[i], runs[i].Values, *replicate)
 			return
 		})
 		if err != nil {

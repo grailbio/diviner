@@ -300,114 +300,22 @@ outer:
 	return nil
 }
 
-// Run performs a single run with the provided study and values. If seq > 0, an
-// existing run will be resumed.  The run is registered in the runner's
-// configured database, and its status is maintained throughout the course of
-// execution. Run returns when the run is complete (its status may be inspected
-// by methods on diviner.Run); all errors are runtime errors, not errors of the
-// run itself. The run is registered with the runner and will show up in the
-// various introspection facilities. Run
-func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Values, replicate int, seq uint64) (diviner.Run, error) {
-	pctx := ctx
-	ctx, cancel := context.WithCancel(ctx)
-	if _, err := r.db.CreateStudyIfNotExist(ctx, study); err != nil {
+// Run performs a single run with the provided study and values. The
+// run is registered in the runner's configured database, and its
+// status is maintained throughout the course of execution. Run
+// returns when the run is complete (its status may be inspected by
+// methods on diviner.Run); all errors are runtime errors, not errors
+// of the run itself. The run is registered with the runner and will
+// show up in the various introspection facilities.
+func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Values, replicate int) (diviner.Run, error) {
+	run, err := r.create(ctx, study, values, replicate)
+	if err != nil {
 		return diviner.Run{}, err
 	}
-	var (
-		err    error
-		resume = (seq > 0)
-		run    = new(run)
-	)
-	if !resume {
-		seq, err = r.db.NextSeq(ctx, study.Name)
-		if err != nil {
-			return diviner.Run{}, err
-		}
-		if seq == 0 {
-			return diviner.Run{}, fmt.Errorf("invalid run sequence: %d", seq)
-		}
-	} else {
-		run.Run, err = r.db.LookupRun(ctx, study.Name, seq)
-		if err != nil {
-			return diviner.Run{}, err
-		}
-		log.Printf("Resuming run study=%+v seq=%v repl=%v", run.Run.Study, run.Run.Seq, run.Run.Replicate)
-		replicate = run.Run.Replicate
-	}
-	var config diviner.RunConfig
-	if study.Run != nil {
-		config, err = study.Run(values, replicate, fmt.Sprintf("%s:%d", study.Name, seq))
-		if err != nil {
-			return diviner.Run{}, err
-		}
-	}
-	if !resume {
-		run.Run, err = r.db.InsertRun(ctx, diviner.Run{
-			Study:     study.Name,
-			Seq:       seq,
-			Replicate: replicate,
-			Values:    values,
-			Config:    config,
-		})
-		if err != nil {
-			return diviner.Run{}, err
-		}
-	}
-	run.Study = study
-	run.Values = values
-	run.Config = config
-	run.Acquire = study.Acquire
-	r.add(run)
-	defer r.remove(run)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	var retries int64
-	go func() {
-		tick := time.NewTicker(keepaliveInterval)
-		defer tick.Stop()
-		defer wg.Done()
-		for {
-			select {
-			case <-tick.C:
-			case <-ctx.Done():
-				return
-			}
-			status, message, elapsed := run.Status()
-			retry := int(atomic.LoadInt64(&retries))
-			if err := r.db.UpdateRun(ctx, study.Name, run.Run.Seq, diviner.Pending, fmt.Sprintf("%s: %s", status, message), elapsed, retry); err != nil && err != context.Canceled {
-				log.Error.Printf("run %s:%d: error setting status: %v", run.Run.Study, run.Run.Seq, message)
-			}
-		}
-	}()
-	state := diviner.Failure
-loop:
-	for ; retries < maxRetries; atomic.AddInt64(&retries, 1) {
-		run.Do(ctx, r)
-		status, message, elapsed := run.Status()
-		Logger.Printf("run %s: %s %s %s", run, status, message, elapsed)
-		switch status {
-		case statusWaiting, statusRunning:
-			log.Error.Printf("run %s returned with incomplete status %s", run, status)
-		case statusOk:
-			state = diviner.Success
-		case statusTimeout:
-			continue loop
-		case statusErr:
-			log.Error.Printf("run %s error: %v", run, message)
-		}
-		break
-	}
-	cancel()
-	wg.Wait() // wait for the last database update
-	ctx = pctx
-	_, message, elapsed := run.Status()
-	if err := r.db.UpdateRun(ctx, study.Name, run.Run.Seq, state, "", elapsed, int(retries)); err != nil {
-		log.Error.Printf("run %s:%d: error setting status: %v", run.Run.Study, run.Run.Seq, message)
+	if err := r.do(ctx, run); err != nil {
 		return diviner.Run{}, err
 	}
-	// Refresh the run status before we return it.
-	run.Run, err = r.db.LookupRun(ctx, study.Name, run.Run.Seq)
-	return run.Run, err
+	return run.Run, nil
 }
 
 func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (done bool, err error) {
@@ -415,7 +323,11 @@ func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (d
 	if err != nil {
 		return false, err
 	}
-	Logger.Printf("%s: requesting new points from oracle from %d trials", study.Name, trials.Len())
+	failed, err := diviner.Trials(ctx, r.db, study, diviner.Failure)
+	if err != nil {
+		return false, err
+	}
+	Logger.Printf("%s: requesting new points from oracle from %d trials (%d failed)", study.Name, trials.Len(), failed.Len())
 
 	var complete []diviner.Trial
 	trials.Range(func(_ diviner.Value, v interface{}) {
@@ -455,10 +367,50 @@ func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (d
 			}
 			replicate := replicate
 			g.Go(func() error {
-				run, err := r.Run(ctx, study, vals, int(replicate), 0)
+				// If the replicate has already been part of a failed run,
+				// restart this run instead of creating a new one. This lets
+				// expensive trials resume from checkpoints, etc.
+				var (
+					run0 *run
+					err  error
+				)
+				if trial, ok := failed.Get(vals); ok && trial.(diviner.Trial).Replicates.Contains(replicate) {
+					// Populate a run from the previous (failed) run. Note that
+					// there is a race here: two competing diviner processes could
+					// attempt to restore the run. We should implement locking in
+					// the database. (e.g., by compare-and-swap the keepalive time).
+					for _, result := range trial.(diviner.Trial).Runs {
+						if result.Replicate != replicate {
+							continue
+						}
+						run0 = &run{
+							Study:   study,
+							Values:  vals,
+							Acquire: study.Acquire,
+						}
+						run0.Run, err = r.db.LookupRun(ctx, study.Name, result.Seq)
+						if err != nil {
+							return err
+						}
+						run0.Config, err = r.configure(study, vals, replicate, int(result.Seq))
+						if err != nil {
+							return err
+						}
+						Logger.Printf("%s: resuming run %s (replicate %d)", study.Name, run0, replicate)
+						break
+					}
+					if run0 == nil {
+						panic("replicate set but not present")
+					}
+				} else {
+					if run0, err = r.create(ctx, study, vals, replicate); err != nil {
+						return err
+					}
+				}
+				err = r.do(ctx, run0)
 				if err == nil {
 					mu.Lock()
-					runs = append(runs, run)
+					runs = append(runs, run0.Run)
 					mu.Unlock()
 				}
 				return err
@@ -474,6 +426,111 @@ func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (d
 		}
 	}
 	return ntrials == 0 || (len(values) < ntrials), nil
+}
+
+// create creates a new run from a study definition, allocating a new run sequence number
+// and inserts it into the database.
+func (r *Runner) create(ctx context.Context, study diviner.Study, values diviner.Values, replicate int) (*run, error) {
+	if _, err := r.db.CreateStudyIfNotExist(ctx, study); err != nil {
+		return nil, err
+	}
+	seq, err := r.db.NextSeq(ctx, study.Name)
+	if err != nil {
+		return nil, err
+	}
+	if seq == 0 {
+		return nil, fmt.Errorf("invalid run sequence: %d", seq)
+	}
+	run := &run{
+		Study:   study,
+		Values:  values,
+		Acquire: study.Acquire,
+	}
+	run.Config, err = r.configure(study, values, replicate, int(seq))
+	if err != nil {
+		return nil, err
+	}
+	run.Run, err = r.db.InsertRun(ctx, diviner.Run{
+		Study:     study.Name,
+		Seq:       seq,
+		Replicate: replicate,
+		Values:    values,
+		Config:    run.Config,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return run, nil
+}
+
+func (r *Runner) configure(study diviner.Study, values diviner.Values, replicate, seq int) (diviner.RunConfig, error) {
+	if study.Run == nil {
+		return diviner.RunConfig{}, nil
+	}
+	return study.Run(values, replicate, fmt.Sprintf("%s:%d", study.Name, seq))
+}
+
+// do executes the provided run in the runner. The run's status is
+// updated in the runner's database; the run is retried up to
+// maxRetries times. If the run is successful, then run.Run contains
+// the results of the run.
+func (r *Runner) do(ctx context.Context, run *run) error {
+	r.add(run)
+	defer r.remove(run)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	origctx := ctx
+	ctx, cancel := context.WithCancel(ctx)
+	// TODO(marius): consider starting with the previous number since we may be
+	// resuming an old run.
+	var retries int64
+	go func() {
+		tick := time.NewTicker(keepaliveInterval)
+		defer tick.Stop()
+		defer wg.Done()
+		for {
+			select {
+			case <-tick.C:
+			case <-ctx.Done():
+				return
+			}
+			status, message, elapsed := run.Status()
+			retry := int(atomic.LoadInt64(&retries))
+			if err := r.db.UpdateRun(ctx, run.Study.Name, run.Run.Seq, diviner.Pending, fmt.Sprintf("%s: %s", status, message), elapsed, retry); err != nil && err != context.Canceled {
+				log.Error.Printf("run %s:%d: error setting status: %v", run.Run.Study, run.Run.Seq, message)
+			}
+		}
+	}()
+	state := diviner.Failure
+loop:
+	for ; retries < maxRetries; atomic.AddInt64(&retries, 1) {
+		run.Do(ctx, r)
+		status, message, elapsed := run.Status()
+		Logger.Printf("run %s: %s %s %s", run, status, message, elapsed)
+		switch status {
+		case statusWaiting, statusRunning:
+			log.Error.Printf("run %s returned with incomplete status %s", run, status)
+		case statusOk:
+			state = diviner.Success
+		case statusTimeout:
+			continue loop
+		case statusErr:
+			log.Error.Printf("run %s error: %v", run, message)
+		}
+		break
+	}
+	cancel()
+	ctx = origctx
+	wg.Wait() // wait for the last database update
+	_, message, elapsed := run.Status()
+	if err := r.db.UpdateRun(ctx, run.Study.Name, run.Run.Seq, state, "", elapsed, int(retries)); err != nil {
+		log.Error.Printf("run %s:%d: error setting status: %v", run.Run.Study, run.Run.Seq, message)
+		return err
+	}
+	// Refresh the run status before we return it.
+	var err error
+	run.Run, err = r.db.LookupRun(ctx, run.Study.Name, run.Run.Seq)
+	return err
 }
 
 // Allocate allocates a new worker and returns it. Workers must

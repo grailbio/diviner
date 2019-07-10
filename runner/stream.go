@@ -42,9 +42,10 @@ func (r *Runner) Stream(ctx context.Context, study diviner.Study, nparallel int)
 }
 
 type runRequest struct {
-	Index int
-	diviner.Values
-	diviner.Replicates
+	Index              int         // index into internal trials slice
+	diviner.Values                 // run values
+	diviner.Replicates             // already computed replicates
+	Failed             map[int]int // of the uncomputed replicates, maps replicate to previous failed run for restarts
 }
 
 type runResponse struct {
@@ -83,13 +84,36 @@ func (s *Streamer) do(ctx context.Context) error {
 					}
 					replicate := replicate
 					g.Go(func() error {
-						run, err := s.runner.Run(ctx, s.study, req.Values, int(replicate), 0)
-						if err == nil {
-							mu.Lock()
-							runs = append(runs, run)
-							mu.Unlock()
+						var run0 *run
+						if seq, ok := req.Failed[replicate]; ok {
+							run0 = &run{
+								Study:   s.study,
+								Values:  req.Values,
+								Acquire: s.study.Acquire,
+							}
+							var err error
+							run0.Run, err = s.runner.db.LookupRun(ctx, s.study.Name, uint64(seq))
+							if err != nil {
+								return err
+							}
+							run0.Config, err = s.runner.configure(s.study, req.Values, replicate, int(seq))
+							if err != nil {
+								return err
+							}
+							Logger.Printf("%s: resuming run %s (replicate %d)", s.study.Name, run0, replicate)
+						} else {
+							var err error
+							if run0, err = s.runner.create(ctx, s.study, req.Values, replicate); err != nil {
+								return err
+							}
 						}
-						return err
+						if err := s.runner.do(ctx, run0); err != nil {
+							return err
+						}
+						mu.Lock()
+						runs = append(runs, run0.Run)
+						mu.Unlock()
+						return nil
 					})
 				}
 				if err := g.Wait(); err != nil {
@@ -126,6 +150,10 @@ func (s *Streamer) do(ctx context.Context) error {
 			trials = append(trials, trial)
 		}
 	})
+	failed, err := diviner.Trials(ctx, s.runner.db, s.study, diviner.Failure)
+	if err != nil {
+		return err
+	}
 	for !done || npending > 0 {
 		// Drain responses in case they are queued.
 		select {
@@ -140,7 +168,7 @@ func (s *Streamer) do(ctx context.Context) error {
 		}
 
 		if n := s.nparallel - npending; !done && len(valueq) == 0 && n > 0 {
-			Logger.Printf("%s: requesting %d new points from oracle from %d trials (streaming)", s.study.Name, n, len(trials))
+			Logger.Printf("%s: requesting %d new points from oracle from %d trials (streaming, %d failed)", s.study.Name, n, len(trials), failed.Len())
 			// TODO(marius): it may be useful to request more points
 			// than we can immediately fill, especially for expensive oracles.
 			// Alternatively, we could make oracle stateful.
@@ -162,6 +190,12 @@ func (s *Streamer) do(ctx context.Context) error {
 			req.Values = valueq[0]
 			if v, ok := initTrials.Get(valueq[0]); ok {
 				req.Replicates = v.(diviner.Trial).Replicates
+			}
+			if trial, ok := failed.Get(req.Values); ok {
+				req.Failed = make(map[int]int)
+				for _, run := range trial.(diviner.Trial).Runs {
+					req.Failed[run.Replicate] = int(run.Seq)
+				}
 			}
 		}
 

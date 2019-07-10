@@ -10,13 +10,14 @@ import (
 	"encoding/gob"
 	"fmt"
 	"io"
-	"log"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/grailbio/base/log"
 	"github.com/grailbio/base/retry"
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/bigmachine/testsystem"
@@ -26,6 +27,10 @@ import (
 	"github.com/grailbio/diviner/runner"
 	"github.com/grailbio/testutil"
 )
+
+func init() {
+	runner.Logger = log.Info
+}
 
 // failingSystem implements bigmachine.System. Start always fails.
 type errorSystem struct {
@@ -198,7 +203,11 @@ func TestReplicatesError(t *testing.T) {
 		&diviner.System{ID: "test", System: test},
 	}
 
-	failReplicate0 := true
+	var (
+		failReplicate0 = true
+		mu             sync.Mutex
+		expectName     = diviner.NewMap() // map[values]map[int]string   // values -> replicate -> study name
+	)
 	study := diviner.Study{
 		Name: "test",
 		Params: diviner.Params{
@@ -212,6 +221,20 @@ func TestReplicatesError(t *testing.T) {
 			if replicate == 0 && failReplicate0 {
 				script = "exit 1"
 			}
+			mu.Lock()
+			defer mu.Unlock()
+			replicatesv, ok := expectName.Get(values)
+			if !ok {
+				expectName.Put(values, make(map[int]string))
+				replicatesv, _ = expectName.Get(values)
+			}
+			replicates := replicatesv.(map[int]string)
+			if name, ok := replicates[replicate]; ok {
+				if id != name {
+					return diviner.RunConfig{}, fmt.Errorf("got %s, want %s for replicate %d", id, name, replicate)
+				}
+			}
+			replicates[replicate] = id
 			return diviner.RunConfig{
 				Systems: systems,
 				Script:  script,
@@ -253,6 +276,8 @@ func TestReplicatesError(t *testing.T) {
 	})
 
 	// Re-run. This time it should catch up only the missing replicates.
+	// The replicates should be restarted from the previous sequence
+	// ids.
 	failReplicate0 = false
 	if done := testRun(t, db, study); !done {
 		t.Fatal("not done")
@@ -262,6 +287,14 @@ func TestReplicatesError(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got, want := len(runs), 3*3; got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	// Make sure there are no more failed runs. They all have succeeded now.
+	runs, err = db.ListRuns(ctx, study.Name, diviner.Failure, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(runs), 0; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 
@@ -465,7 +498,7 @@ func testScript(t *testing.T, db diviner.Database, retries int, state diviner.Ru
 		}
 	}()
 	study := testStudy(script)
-	run, err := r.Run(ctx, study, nil, 0, 0)
+	run, err := r.Run(ctx, study, nil, 0)
 	cancel()
 	if err != nil {
 		t.Fatal(err)

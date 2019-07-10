@@ -313,8 +313,11 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 	if _, err := r.db.CreateStudyIfNotExist(ctx, study); err != nil {
 		return diviner.Run{}, err
 	}
-	resume := (seq > 0)
-	var err error
+	var (
+		err    error
+		resume = (seq > 0)
+		run    = new(run)
+	)
 	if !resume {
 		seq, err = r.db.NextSeq(ctx, study.Name)
 		if err != nil {
@@ -323,19 +326,22 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 		if seq == 0 {
 			return diviner.Run{}, fmt.Errorf("invalid run sequence: %d", seq)
 		}
+	} else {
+		run.Run, err = r.db.LookupRun(ctx, study.Name, seq)
+		if err != nil {
+			return diviner.Run{}, err
+		}
+		log.Printf("Resuming run study=%+v seq=%v repl=%v", run.Run.Study, run.Run.Seq, run.Run.Replicate)
+		replicate = run.Run.Replicate
 	}
 	var config diviner.RunConfig
 	if study.Run != nil {
-		var err error
 		config, err = study.Run(values, replicate, fmt.Sprintf("%s:%d", study.Name, seq))
 		if err != nil {
 			return diviner.Run{}, err
 		}
 	}
-	run := new(run)
-	if resume {
-		run.Run, err = r.db.LookupRun(ctx, study.Name, seq)
-	} else {
+	if !resume {
 		run.Run, err = r.db.InsertRun(ctx, diviner.Run{
 			Study:     study.Name,
 			Seq:       seq,
@@ -343,9 +349,9 @@ func (r *Runner) Run(ctx context.Context, study diviner.Study, values diviner.Va
 			Values:    values,
 			Config:    config,
 		})
-	}
-	if err != nil {
-		return diviner.Run{}, err
+		if err != nil {
+			return diviner.Run{}, err
+		}
 	}
 	run.Study = study
 	run.Values = values

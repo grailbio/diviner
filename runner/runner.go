@@ -392,11 +392,11 @@ func (r *Runner) Round(ctx context.Context, study diviner.Study, ntrials int) (d
 						if err != nil {
 							return err
 						}
+						Logger.Printf("%s: resuming run %s (replicate %d)", study.Name, run0, replicate)
 						run0.Config, err = r.configure(study, vals, replicate, int(result.Seq))
 						if err != nil {
 							return err
 						}
-						Logger.Printf("%s: resuming run %s (replicate %d)", study.Name, run0, replicate)
 						break
 					}
 					if run0 == nil {

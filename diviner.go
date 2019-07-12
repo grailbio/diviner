@@ -14,9 +14,11 @@ package diviner
 import (
 	"errors"
 	"fmt"
+	"log"
 	"math/bits"
 	"sort"
 	"strings"
+	"time"
 
 	"go.starlark.net/starlark"
 )
@@ -191,6 +193,18 @@ type Trial struct {
 	Runs []Run
 }
 
+// Timestamp returns the latest time at which any run comprising
+// this trial was done.
+func (t Trial) Timestamp() time.Time {
+	var stamp time.Time
+	for _, run := range t.Runs {
+		if stamp.Before(run.Updated) {
+			stamp = run.Updated
+		}
+	}
+	return stamp
+}
+
 // Equal reports whether the two trials are equal.
 func (t Trial) Equal(u Trial) bool {
 	return t.Values.Equal(u.Values) && t.Metrics.Equal(u.Metrics)
@@ -220,20 +234,33 @@ func (t Trial) Range(name string) (min, max float64) {
 
 // ReplicatedTrials constructs a single trial from the provided
 // trials. The composite trial represents each replicate present in
-// the provided replicates. Metrics are averaged.
+// the provided replicates. Metrics are averaged. The provided trials
+// cannot themselves contain multiple replicates.
 func ReplicatedTrial(replicates []Trial) Trial {
 	if len(replicates) == 0 {
 		panic("no replicates provided")
 	}
+	// Select at most one "winning" for each replicate. If there are
+	// multiple trials for a given replicate, we first try to pick a
+	// non-pending one; if all trials are pending, we pick the latest
+	// one.
+	selected := make(map[int]Trial)
+	for _, rep := range replicates {
+		if rep.Replicates.Count() != 1 {
+			log.Panicf("diviner.ReplicatedTrial: invalid trial %v with %d replicates", rep, rep.Replicates.Count())
+		}
+		n, _ := rep.Replicates.Next()
+		prev, ok := selected[n]
+		if !ok || prev.Pending && !rep.Pending || prev.Timestamp().Before(rep.Timestamp()) {
+			selected[n] = rep
+		}
+	}
+
 	var (
 		counts = make(map[string]int)
 		trial  = Trial{Values: replicates[0].Values, Metrics: make(Metrics), ReplicateMetrics: make(map[int]Metrics)}
 	)
-	for _, rep := range replicates {
-		if trial.Replicates&rep.Replicates != 0 {
-			// TODO(marius): pick "best" replicate?
-			continue
-		}
+	for _, rep := range selected {
 		for name, value := range rep.Metrics {
 			counts[name]++
 			n := float64(counts[name])

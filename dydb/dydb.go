@@ -283,9 +283,8 @@ func (d *DB) AppendRunMetrics(ctx context.Context, study string, seq uint64, met
 // ListRuns returns all runs in the provided study matching the query states that
 // have also been active since the provided time.
 func (d *DB) ListRuns(ctx context.Context, study string, states diviner.RunState, since time.Time) (runs []diviner.Run, err error) {
-	minPendingTime := time.Now().Add(-2 * keepaliveInterval)
 	if since.IsZero() && states == diviner.Pending {
-		since = minPendingTime
+		since = time.Now().Add(-2 * keepaliveInterval)
 	}
 	if !since.IsZero() {
 		items, err := d.querySince(ctx, since, func() *dynamodb.QueryInput {
@@ -309,14 +308,11 @@ func (d *DB) ListRuns(ctx context.Context, study string, states diviner.RunState
 		input := &dynamodb.QueryInput{
 			TableName:              aws.String(d.table),
 			KeyConditionExpression: aws.String(`#study = :study AND #run > :zero`),
-			FilterExpression:       aws.String(`#state <> :pending OR #keepalive > :min_pending_time`),
 			ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-				":study":            {S: aws.String(study)},
-				":zero":             {N: aws.String("0")},
-				":pending":          {S: aws.String("pending")},
-				":min_pending_time": {S: aws.String(minPendingTime.UTC().Format(time.RFC3339))},
+				":study": {S: aws.String(study)},
+				":zero":  {N: aws.String("0")},
 			},
-			ExpressionAttributeNames: appendAttributeNames(nil, "study", "run", "state", "keepalive"),
+			ExpressionAttributeNames: appendAttributeNames(nil, "study", "run"),
 		}
 		if lastKey != nil {
 			input.ExclusiveStartKey = lastKey
@@ -470,14 +466,10 @@ func (d *DB) querySince(ctx context.Context, since time.Time, newQuery func() *d
 }
 
 func (d *DB) appendRuns(runs []diviner.Run, study string, states diviner.RunState, since time.Time, items ...map[string]*dynamodb.AttributeValue) ([]diviner.Run, error) {
-	minPendingTime := time.Now().Add(-2 * keepaliveInterval)
 	for i, item := range items {
 		run, err := unmarshal(item)
 		if err != nil {
 			log.Error.Printf("dropping run %d of study %s unmarshal: %v", i, study, err)
-			continue
-		}
-		if run.State == diviner.Pending && run.Updated.Before(minPendingTime) {
 			continue
 		}
 		if run.Updated.Before(since) {
@@ -592,6 +584,9 @@ func unmarshal(attrs map[string]*dynamodb.AttributeValue) (diviner.Run, error) {
 	}
 	if run.Updated, err = time.Parse(timeLayout, dyrun.Keepalive); err != nil {
 		return diviner.Run{}, err
+	}
+	if run.State == diviner.Pending && time.Since(run.Updated) > 2*keepaliveInterval {
+		run.State = diviner.Failure
 	}
 	// Ignore dyrun.Date; this is just for indexing.
 	if dyrun.Runtime != "" {

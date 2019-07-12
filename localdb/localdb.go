@@ -217,7 +217,6 @@ func (d *DB) ListRuns(ctx context.Context, study string, states diviner.RunState
 		if b == nil {
 			return nil
 		}
-		minPendingTime := time.Now().Add(-2 * keepaliveInterval)
 		return b.ForEach(func(k, v []byte) error {
 			if len(k) != 8 {
 				return errors.New("malformed key")
@@ -238,8 +237,8 @@ func (d *DB) ListRuns(ctx context.Context, study string, states diviner.RunState
 			if run.Updated.Before(since) {
 				return nil
 			}
-			if run.State == diviner.Pending && run.Updated.Before(minPendingTime) {
-				return nil
+			if run.State == diviner.Pending && time.Since(run.Updated) > 2*keepaliveInterval {
+				run.State = diviner.Failure
 			}
 			if run.State&states != run.State {
 				return nil
@@ -268,6 +267,9 @@ func (d *DB) LookupRun(ctx context.Context, study string, seq uint64) (run divin
 		}
 		if err != nil {
 			return err
+		}
+		if run.State == diviner.Pending && time.Since(run.Updated) > 2*keepaliveInterval {
+			run.State = diviner.Failure
 		}
 		run.Metrics, err = unmarshalMetrics(b)
 		return err

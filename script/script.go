@@ -749,7 +749,7 @@ func starlark2diviner(val starlark.Value) diviner.Value {
 				return nil
 			}
 		}
-		return &list
+		return list
 	case *starlark.Dict:
 		dict := make(diviner.Dict, val.Len())
 		for _, kv := range val.Items() {
@@ -763,7 +763,7 @@ func starlark2diviner(val starlark.Value) diviner.Value {
 			}
 			dict[subkey] = subval
 		}
-		return &dict
+		return dict
 	default:
 		return nil
 	}

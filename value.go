@@ -387,7 +387,12 @@ func (Values) Kind() Kind { return ValueDict }
 func (v Values) Equal(wv Value) bool {
 	w, ok := wv.(Values)
 	if !ok {
-		return false
+		// For backward compatibility. Older diviner used *Value as well as Value.
+		wp, ok := wv.(*Values)
+		if !ok {
+			return false
+		}
+		w = *wp
 	}
 	if v.Len() != w.Len() {
 		return false
@@ -397,7 +402,7 @@ func (v Values) Equal(wv Value) bool {
 		if vlist[i].Name != wlist[i].Name {
 			return false
 		}
-		if !vlist[i].Equal(wlist[i]) {
+		if !vlist[i].Value.Equal(wlist[i].Value) {
 			return false
 		}
 	}

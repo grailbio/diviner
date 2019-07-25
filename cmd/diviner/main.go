@@ -311,11 +311,17 @@ func main() {
 
 	runner.Logger = log.Info
 
+	cwd := flag.String("C", "", "Enter the given directory")
 	databaseConfig := flag.String("db", "dynamodb,diviner-patchcnn", "database table where state is stored")
 	flag.Usage = usage
 	flag.Parse()
 	if flag.NArg() == 0 {
 		flag.Usage()
+	}
+	if *cwd != "" {
+		if err := os.Chdir(*cwd); err != nil {
+			log.Fatal(err)
+		}
 	}
 	var database diviner.Database
 	parts := strings.SplitN(*databaseConfig, ",", 2)

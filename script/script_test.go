@@ -100,11 +100,11 @@ func TestParams(t *testing.T) {
 	if got, want := len(dict), 2; got != want {
 		t.Fatalf("got %v, want %v", got, want)
 	}
-	s := dict[0].(*diviner.Dict).Sorted()
+	s := dict[0].(diviner.Dict).Sorted()
 	if len(s) != 1 || s[0].Name != "k0" || s[0].String() != "v0" {
 		t.Errorf("bad dict: %+v", s)
 	}
-	s = dict[1].(*diviner.Dict).Sorted()
+	s = dict[1].(diviner.Dict).Sorted()
 	if len(s) != 2 || s[0].Name != "k0" || s[0].String() != "v1" || s[1].Name != "k1" || s[1].String() != "v2" {
 		t.Errorf("bad dict: %+v", s)
 	}

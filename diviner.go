@@ -157,7 +157,7 @@ func (r Replicates) Count() int {
 // Iteration can thus proceed:
 //
 //	var r Replicates
-//	for r, num := r.Next(); r != -1; r, num = r.Next() {
+//	for num, r := r.Next(); num != -1; num, r = r.Next() {
 //		// Process num
 //	}
 func (r Replicates) Next() (int, Replicates) {

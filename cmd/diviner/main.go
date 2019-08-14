@@ -1112,7 +1112,7 @@ specifying regular expressions for matching them via the flags
 		tw            tabwriter.Writer
 	)
 	tw.Init(os.Stdout, 4, 4, 1, ' ', 0)
-	fmt.Fprintf(&tw, "study\t%s", objective.Metric)
+	fmt.Fprintf(&tw, "study\treplicates\t%s", objective.Metric)
 	if len(metricsOrdered) > 0 {
 		for _, metric := range metricsOrdered {
 			fmt.Fprint(&tw, "\t"+metric.Metric)
@@ -1151,7 +1151,14 @@ specifying regular expressions for matching them via the flags
 		for i := range seqs {
 			seqs[i] = fmt.Sprint(trial.Runs[i].Seq)
 		}
-		fmt.Fprintf(&tw, "%s:%s\t", trial.Study, strings.Join(seqs, ","))
+
+		replicates := make([]string, 0, trial.Replicates.Count())
+		r := trial.Replicates
+		for idx, r := r.Next(); idx != -1; idx, r = r.Next() {
+			replicates = append(replicates, fmt.Sprint(idx))
+		}
+
+		fmt.Fprintf(&tw, "%s:%s\t%s\t", trial.Study, strings.Join(seqs, ","), strings.Join(replicates, ","))
 		if min == max {
 			fmt.Fprintf(&tw, "%.3g", v)
 		} else {

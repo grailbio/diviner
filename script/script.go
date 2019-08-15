@@ -141,6 +141,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/aws/aws-sdk-go/aws"
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/bigmachine"
 	"github.com/grailbio/bigmachine/ec2system"
@@ -520,7 +521,7 @@ func makeEC2System(thread *starlark.Thread, _ *starlark.Builtin, args starlark.T
 	var (
 		system               = new(diviner.System)
 		ec2                  = new(ec2system.System)
-		flavor               string
+		region, flavor       string
 		diskspace, dataspace int // UnpackArgs doesn't support uint
 	)
 	system.System = ec2
@@ -528,7 +529,7 @@ func makeEC2System(thread *starlark.Thread, _ *starlark.Builtin, args starlark.T
 		"ec2system", args, kwargs,
 		"name", &system.ID,
 		"ami", &ec2.AMI,
-		"region?", &ec2.Region,
+		"region?", &region,
 		"security_group?", &ec2.SecurityGroup,
 		"instance_profile", &ec2.InstanceProfile,
 		"instance_type", &ec2.InstanceType,
@@ -539,6 +540,9 @@ func makeEC2System(thread *starlark.Thread, _ *starlark.Builtin, args starlark.T
 	)
 	if err != nil {
 		return nil, err
+	}
+	if region != "" {
+		ec2.AWSConfig = &aws.Config{Region: aws.String(region)}
 	}
 	switch flavor {
 	case "", "ubuntu":

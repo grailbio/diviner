@@ -20,7 +20,6 @@ import (
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/base/retry"
 	"github.com/grailbio/bigmachine"
-	"github.com/grailbio/bigmachine/ec2system"
 	"github.com/grailbio/bigmachine/rpc"
 	"github.com/kr/pty"
 	"golang.org/x/sync/errgroup"
@@ -31,10 +30,7 @@ import (
 // here for testing.
 //
 // TODO(marius): make this unnecessary by fixing bigmachine.
-var Preamble = `set -ex; `
-
-// PreambleUbuntu is applied to EC2 ubuntu systems.
-var PreambleUbuntu = `su - ubuntu; export HOME=/home/ubuntu; `
+var DefaultPreamble = `set -ex; `
 
 var (
 	machineRetry = retry.Jitter(retry.Backoff(30*time.Second, 5*time.Minute, 1.5), 0.5)
@@ -174,11 +170,11 @@ func (w *worker) CopyFiles(ctx context.Context, files []string) error {
 // output and standard error.
 func (w *worker) Run(ctx context.Context, script string, env []string) (io.ReadCloser, error) {
 	var out io.ReadCloser
-	// TODO(marius): allow EC2 bigmachine to run under the default user.
-	if ec2, ok := w.Session.System.System.(*ec2system.System); ok && ec2.Flavor == ec2system.Ubuntu {
-		script = PreambleUbuntu + script
+	preamble := w.Session.System.Preamble
+	if preamble == "" {
+		preamble = DefaultPreamble
 	}
-	script = Preamble + script
+	script = preamble + script
 	c := cmd{
 		Args: []string{"bash", "-c", script},
 		Env:  env,

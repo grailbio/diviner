@@ -132,14 +132,20 @@ package script
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
+
+	"encoding/gob"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/grailbio/base/log"
@@ -517,11 +523,78 @@ func makeLocalSystem(thread *starlark.Thread, _ *starlark.Builtin, args starlark
 	return system, err
 }
 
+// EC2System is logically identical to bigmachine's ec2system.System, but it is
+// gob'able. It implements bigmachine.System.
+type ec2System struct {
+	// The following exported fields have exactly the same meaning as counterparts
+	// in ec2system.System.
+	OnDemand        bool
+	InstanceType    string
+	AMI             string
+	Flavor          ec2system.Flavor
+	Region          string
+	SecurityGroup   string
+	Diskspace       uint
+	Dataspace       uint
+	InstanceProfile string
+
+	// "system" is instantiated on first use.
+	once   sync.Once
+	system *ec2system.System
+}
+
+var _ = (bigmachine.System)(&ec2System{})
+
+// Get instanciates the *ec2system.System from the parameters stored in this
+// object.  Repeated calls will return the same object. Thread safe.
+func (s *ec2System) get() *ec2system.System {
+	s.once.Do(func() {
+		b := new(ec2system.System)
+		b.OnDemand = s.OnDemand
+		b.InstanceType = s.InstanceType
+		b.AMI = s.AMI
+		b.Flavor = s.Flavor
+		if s.Region != "" {
+			b.AWSConfig = &aws.Config{Region: aws.String(s.Region)}
+		}
+		b.SecurityGroup = s.SecurityGroup
+		b.Diskspace = s.Diskspace
+		b.Dataspace = s.Dataspace
+		b.InstanceProfile = s.InstanceProfile
+		s.system = b
+	})
+	return s.system
+}
+
+// The following methods implement bigmachine.System. They all simply forward
+// the calls to ec2system.System.
+func (s *ec2System) Name() string               { return s.get().Name() }
+func (s *ec2System) Init(b *bigmachine.B) error { return s.get().Init(b) }
+func (s *ec2System) Main() error                { return s.get().Main() }
+func (s *ec2System) HTTPClient() *http.Client   { return s.get().HTTPClient() }
+func (s *ec2System) ListenAndServe(addr string, handle http.Handler) error {
+	return s.get().ListenAndServe(addr, handle)
+}
+func (s *ec2System) Start(ctx context.Context, n int) ([]*bigmachine.Machine, error) {
+	return s.get().Start(ctx, n)
+}
+func (s *ec2System) Exit(code int) { s.get().Exit(code) }
+func (s *ec2System) Shutdown()     { s.get().Shutdown() }
+func (s *ec2System) Maxprocs() int { return s.get().Maxprocs() }
+func (s *ec2System) KeepaliveConfig() (period, timeout, rpcTimeout time.Duration) {
+	return s.get().KeepaliveConfig()
+}
+func (s *ec2System) Tail(ctx context.Context, w io.Writer, m *bigmachine.Machine) error {
+	return s.get().Tail(ctx, w, m)
+}
+
+func init() { gob.Register(new(ec2System)) }
+
 func makeEC2System(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var (
 		system               = new(diviner.System)
-		ec2                  = new(ec2system.System)
-		region, flavor       string
+		ec2                  = new(ec2System)
+		flavor               string
 		diskspace, dataspace int // UnpackArgs doesn't support uint
 	)
 	system.System = ec2
@@ -529,7 +602,7 @@ func makeEC2System(thread *starlark.Thread, _ *starlark.Builtin, args starlark.T
 		"ec2system", args, kwargs,
 		"name", &system.ID,
 		"ami", &ec2.AMI,
-		"region?", &region,
+		"region?", &ec2.Region,
 		"security_group?", &ec2.SecurityGroup,
 		"instance_profile", &ec2.InstanceProfile,
 		"instance_type", &ec2.InstanceType,
@@ -541,12 +614,10 @@ func makeEC2System(thread *starlark.Thread, _ *starlark.Builtin, args starlark.T
 	if err != nil {
 		return nil, err
 	}
-	if region != "" {
-		ec2.AWSConfig = &aws.Config{Region: aws.String(region)}
-	}
 	switch flavor {
 	case "", "ubuntu":
 		ec2.Flavor = ec2system.Ubuntu
+		system.Preamble = `su - ubuntu; export HOME=/home/ubuntu; `
 	case "coreos":
 		ec2.Flavor = ec2system.CoreOS
 	default:

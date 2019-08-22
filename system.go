@@ -18,6 +18,9 @@ type System struct {
 	// Parallelism specifies the maximum level of job parallelism allowable for
 	// this system. If <= 0, the system allows unlimited parallelism.
 	Parallelism int
+	// Bash snippet to be prepended to the user script.
+	// If empty, runner.DefaultPreamble is used.
+	Preamble string
 }
 
 // String implements starlark.Value.

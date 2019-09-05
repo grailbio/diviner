@@ -584,8 +584,11 @@ func (s *ec2System) Maxprocs() int { return s.get().Maxprocs() }
 func (s *ec2System) KeepaliveConfig() (period, timeout, rpcTimeout time.Duration) {
 	return s.get().KeepaliveConfig()
 }
-func (s *ec2System) Tail(ctx context.Context, w io.Writer, m *bigmachine.Machine) error {
-	return s.get().Tail(ctx, w, m)
+func (s *ec2System) Tail(ctx context.Context, m *bigmachine.Machine) (io.Reader, error) {
+	return s.get().Tail(ctx, m)
+}
+func (s *ec2System) Read(ctx context.Context, m *bigmachine.Machine, filename string) (io.Reader, error) {
+	return s.get().Read(ctx, m, filename)
 }
 
 func init() { gob.Register(new(ec2System)) }

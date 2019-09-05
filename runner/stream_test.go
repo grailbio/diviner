@@ -31,13 +31,19 @@ func TestStream(t *testing.T) {
 				select {
 				case <-enterc:
 				case <-timeout:
-					t.Fatalf("timed out while waiting for %d entries", n)
+					t.Fatalf("timed out while waiting (enter) for %d entries", n)
 				}
 			}
 		}
 		exit = func(n int) {
+			t.Helper()
+			timeout := time.After(30 * time.Second)
 			for i := 0; i < n; i++ {
-				exitc <- struct{}{}
+				select {
+				case exitc <- struct{}{}:
+				case <-timeout:
+					t.Fatalf("timed out while waiting (exit) for %d entries", n)
+				}
 			}
 		}
 	)

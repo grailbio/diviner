@@ -474,13 +474,12 @@ func (r *Runner) configure(study diviner.Study, values diviner.Values, replicate
 // updated in the runner's database; the run is retried up to
 // maxRetries times. If the run is successful, then run.Run contains
 // the results of the run.
-func (r *Runner) do(ctx context.Context, run *run) error {
+func (r *Runner) do(origctx context.Context, run *run) error {
 	r.add(run)
 	defer r.remove(run)
 	var wg sync.WaitGroup
 	wg.Add(1)
-	origctx := ctx
-	ctx, cancel := context.WithCancel(ctx)
+	newctx, cancel := context.WithCancel(origctx)
 	// TODO(marius): consider starting with the previous number since we may be
 	// resuming an old run.
 	var retries int64
@@ -491,12 +490,12 @@ func (r *Runner) do(ctx context.Context, run *run) error {
 		for {
 			select {
 			case <-tick.C:
-			case <-ctx.Done():
+			case <-newctx.Done():
 				return
 			}
 			status, message, elapsed := run.Status()
 			retry := int(atomic.LoadInt64(&retries))
-			if err := r.db.UpdateRun(ctx, run.Study.Name, run.Run.Seq, diviner.Pending, fmt.Sprintf("%s: %s", status, message), elapsed, retry); err != nil && err != context.Canceled {
+			if err := r.db.UpdateRun(newctx, run.Study.Name, run.Run.Seq, diviner.Pending, fmt.Sprintf("%s: %s", status, message), elapsed, retry); err != nil && err != context.Canceled {
 				log.Error.Printf("run %s:%d: error setting status: %v", run.Run.Study, run.Run.Seq, message)
 			}
 		}
@@ -504,7 +503,7 @@ func (r *Runner) do(ctx context.Context, run *run) error {
 	state := diviner.Failure
 loop:
 	for ; retries < maxRetries; atomic.AddInt64(&retries, 1) {
-		run.Do(ctx, r)
+		run.Do(newctx, r)
 		status, message, elapsed := run.Status()
 		Logger.Printf("run %s: %s %s %s", run, status, message, elapsed)
 		switch status {
@@ -520,16 +519,15 @@ loop:
 		break
 	}
 	cancel()
-	ctx = origctx
 	wg.Wait() // wait for the last database update
 	_, message, elapsed := run.Status()
-	if err := r.db.UpdateRun(ctx, run.Study.Name, run.Run.Seq, state, "", elapsed, int(retries)); err != nil {
+	if err := r.db.UpdateRun(origctx, run.Study.Name, run.Run.Seq, state, "", elapsed, int(retries)); err != nil {
 		log.Error.Printf("run %s:%d: error setting status: %v", run.Run.Study, run.Run.Seq, message)
 		return err
 	}
 	// Refresh the run status before we return it.
 	var err error
-	run.Run, err = r.db.LookupRun(ctx, run.Study.Name, run.Run.Seq)
+	run.Run, err = r.db.LookupRun(origctx, run.Study.Name, run.Run.Seq)
 	return err
 }
 

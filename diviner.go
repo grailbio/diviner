@@ -460,6 +460,9 @@ type Study struct {
 	// each trial in the study.
 	Replicates int
 
+	// Human-readable description of the study.
+	Description string
+
 	// Oracle is the oracle used to pick parameter values.
 	Oracle Oracle `json:"-"` // TODO(marius): encode oracle name/type/params?
 

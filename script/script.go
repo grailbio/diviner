@@ -81,6 +81,7 @@
 //		              specifying the replicate number associated with the run.
 //		- replicates: the number of replicates to perform for each parameter
 // 		              combination.
+//    - description:an optional string describing the study.
 //		- oracle:     the oracle to use (grid search by default).
 //
 //	grid_search
@@ -336,6 +337,7 @@ func makeStudy(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple
 		"objective", &study.Objective,
 		"oracle?", &oracle,
 		"replicates?", &study.Replicates,
+		"description?", &study.Description,
 	)
 	if err != nil {
 		return nil, err

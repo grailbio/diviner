@@ -525,6 +525,7 @@ var (
 	{{$value.Name}}:	{{$value.Param}}{{end}}
 	oracle:	{{printf "%T" .Oracle}}
 	replicates:	{{.Replicates}}
+	description:	{{.Description}}
 `))
 
 	runFuncMap = template.FuncMap{

@@ -221,6 +221,7 @@ type logReader struct {
 	sess          *session.Session
 	group, stream string
 
+	since     time.Time
 	follow    bool
 	save, buf []byte
 	nextToken *string
@@ -228,9 +229,9 @@ type logReader struct {
 
 // Log returns an io.Reader that reads log messages from
 // the AWS CloudWatch Logs service.
-func (d *DB) Log(study string, seq uint64, follow bool) io.Reader {
+func (d *DB) Log(study string, seq uint64, since time.Time, follow bool) io.Reader {
 	group, stream := d.streamKeys(study, seq)
-	return &logReader{sess: d.sess, group: group, stream: stream, follow: follow}
+	return &logReader{sess: d.sess, group: group, stream: stream, since: since, follow: follow}
 }
 
 func (r *logReader) Read(p []byte) (n int, err error) {
@@ -261,6 +262,9 @@ func (r *logReader) append(buf []byte) ([]byte, error) {
 		LogStreamName: aws.String(r.stream),
 		StartFromHead: aws.Bool(true),
 		NextToken:     r.nextToken,
+	}
+	if !r.since.IsZero() {
+		input.StartTime = aws.Int64(r.since.UnixNano() / 1000000) // nanosec -> millisec
 	}
 	out, err := client.GetLogEvents(input)
 	debug("cloudwatchlogs.GetLogEvents", input, out, err)

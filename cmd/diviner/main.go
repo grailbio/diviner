@@ -151,7 +151,7 @@
 //		Re-run previous runs in studies defined in the script.dv.
 //		This uses parameter values from a previous run(s) and
 // 		re-runs them.
-//	diviner logs [-f] run
+//	diviner logs [-f] [-since=time] run
 //		Write the logs for the given run to standard output.
 //
 // diviner list [-runs] studies... lists the studies matching the regular
@@ -391,6 +391,17 @@ func match(studies *[]diviner.Study, pat string) {
 	*studies = (*studies)[:n]
 }
 
+func parseSince(s string) (time.Time, error) {
+	if d, err := time.ParseDuration(s); err == nil {
+		return time.Now().Add(-d), nil
+	}
+	since, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("-since=%s does not parse as a duration or date\n", s)
+	}
+	return since, nil
+}
+
 func list(db diviner.Database, args []string) {
 	var (
 		flags     = flag.NewFlagSet("list", flag.ExitOnError)
@@ -421,10 +432,9 @@ the given study names.`)
 	}
 	var since time.Time
 	if *sinceFlag != "" {
-		if d, err := time.ParseDuration(*sinceFlag); err == nil {
-			since = time.Now().Add(-d)
-		} else if since, err = time.Parse("2006-01-02", *sinceFlag); err != nil {
-			fmt.Fprintf(os.Stderr, "-since=%s does not parse as a duration or date\n", *sinceFlag)
+		var err error
+		if since, err = parseSince(*sinceFlag); err != nil {
+			fmt.Fprintf(os.Stderr, err.Error())
 			flags.Usage()
 		}
 	}
@@ -1207,8 +1217,9 @@ specifying regular expressions for matching them via the flags
 
 func logs(db diviner.Database, args []string) {
 	var (
-		flags  = flag.NewFlagSet("logs", flag.ExitOnError)
-		follow = flags.Bool("f", false, "follow the log: print updates as they are appended")
+		flags     = flag.NewFlagSet("logs", flag.ExitOnError)
+		sinceFlag = flags.String("since", "", "only show messages that have been generated since the provided date or duration")
+		follow    = flags.Bool("f", false, "follow the log: print updates as they are appended")
 	)
 	flags.Usage = func() {
 		fmt.Fprintf(os.Stderr, `usage: diviner logs [-f] run
@@ -1229,7 +1240,15 @@ the logs is followed and updates are printed as they become available.
 	if seq == 0 {
 		log.Fatalf("invalid run name %s", flags.Arg(0))
 	}
-	if _, err := io.Copy(os.Stdout, db.Log(study, seq, *follow)); err != nil {
+	var since time.Time
+	if *sinceFlag != "" {
+		var err error
+		if since, err = parseSince(*sinceFlag); err != nil {
+			fmt.Fprintf(os.Stderr, err.Error())
+			flags.Usage()
+		}
+	}
+	if _, err := io.Copy(os.Stdout, db.Log(study, seq, since, *follow)); err != nil {
 		log.Fatal(err)
 	}
 }

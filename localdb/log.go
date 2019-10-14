@@ -10,6 +10,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/grailbio/base/log"
 	"github.com/grailbio/diviner"
 	bolt "go.etcd.io/bbolt"
 )
@@ -72,7 +73,11 @@ type runReader struct {
 }
 
 // Log implements diviner.Run.
-func (d *DB) Log(study string, seq uint64, follow bool) io.Reader {
+func (d *DB) Log(study string, seq uint64, since time.Time, follow bool) io.Reader {
+	// TODO(saito) Support "since".
+	if !since.IsZero() {
+		log.Error.Printf("localdb log %s: -since not supported", study)
+	}
 	return &runReader{db: d.db, study: study, seq: seq, whence: 1, follow: follow}
 }
 

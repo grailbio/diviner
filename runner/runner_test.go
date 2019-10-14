@@ -372,7 +372,7 @@ func TestRunnerError(t *testing.T) {
 			continue
 		}
 		var b bytes.Buffer
-		if _, err := io.Copy(&b, db.Log(run.Study, run.Seq, false)); err != nil {
+		if _, err := io.Copy(&b, db.Log(run.Study, run.Seq, time.Time{}, false)); err != nil {
 			t.Error(err)
 			continue
 		}

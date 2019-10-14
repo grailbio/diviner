@@ -149,10 +149,11 @@ type Database interface {
 	// LookupRun returns the run named by the provided study and sequence number.
 	LookupRun(ctx context.Context, study string, seq uint64) (Run, error)
 
-	// Log obtains a reader for the logs emitted by the run named by the
-	// study and sequence number. If follow is true, the returned reader
-	// is a perpetual stream, updated as new log entries are appended.
-	Log(study string, seq uint64, follow bool) io.Reader
+	// Log obtains a reader for the logs emitted by the run named by the study and
+	// sequence number. If !since.IsZero(), show messages added at or after the
+	// given time. If follow is true, the returned reader is a perpetual stream,
+	// updated as new log entries are appended.
+	Log(study string, seq uint64, since time.Time, follow bool) io.Reader
 
 	// Logger returns an io.WriteCloser, to which log messages can be written,
 	// for the run named by a study and sequence number.

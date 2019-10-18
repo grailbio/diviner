@@ -240,7 +240,7 @@ outer:
 				if !ok {
 					sess = &session{
 						System:   sys,
-						B:        bigmachine.Start(sys),
+						B:        bigmachine.Start(sys, bigmachine.Name(sys.ID)),
 						Requests: map[*request]struct{}{},
 					}
 					if sess.System.Name() != "testsystem" {

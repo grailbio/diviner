@@ -124,6 +124,9 @@
 //		Dictionaries cannot currently be nested. Enumeration values as created
 //		by enum_value are rendered as protocol buffer enumeration, not strings.
 //
+//  panic(messages...)
+//    Print the messages and crash the process.
+//
 // Diviner configs must include one or more studies as toplevel declarations.
 // Global starlark objects are frozen after initial evaluation to prevent functions
 // from modifying shared state.
@@ -184,6 +187,7 @@ var builtins = starlark.StringDict{
 	"temp_file":   starlark.NewBuiltin("temp_file", makeTempFile),
 	"enum_value":  starlark.NewBuiltin("enum_value", makeEnumValue),
 	"to_proto":    starlark.NewBuiltin("to_proto", makeToProto),
+	"panic":       starlark.NewBuiltin("panic", makePanic),
 }
 
 func makeLoader(entrypoint string) func(thread *starlark.Thread, module string) (starlark.StringDict, error) {
@@ -803,6 +807,21 @@ func makeToProto(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tup
 		}
 	}
 	return starlark.String(buf.String()), nil
+}
+
+func makePanic(thread *starlark.Thread, _ *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	if len(kwargs) > 0 {
+		log.Panicf("panic: panic takes no keyword args, but got %+v", kwargs)
+	}
+	buf := strings.Builder{}
+	for i, arg := range args {
+		if i > 0 {
+			buf.WriteString(" ")
+		}
+		buf.WriteString(arg.String())
+	}
+	log.Panic(buf.String())
+	return nil, nil // never reached
 }
 
 // starlark2diviner translates a Starlark value to a Diviner value.

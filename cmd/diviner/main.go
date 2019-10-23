@@ -237,7 +237,6 @@ import (
 	"github.com/grailbio/base/log"
 	"github.com/grailbio/base/traverse"
 	"github.com/grailbio/bigmachine"
-	"github.com/grailbio/bigmachine/ec2system"
 	"github.com/grailbio/diviner"
 	"github.com/grailbio/diviner/dydb"
 	"github.com/grailbio/diviner/localdb"
@@ -295,22 +294,11 @@ var traverser = traverse.Limit(400)
 
 func main() {
 	initS3()
-	// This is a temporary hack required to bootstrap worker nodes
-	// without also shipping the run spec.
-	//
-	// TODO(marius): fix this in bigmachine itself.
-	switch os.Getenv("BIGMACHINE_SYSTEM") {
-	case "ec2":
-		log.Fatal(bigmachine.Start(new(ec2system.System)))
-	case "local":
-		log.Fatal(bigmachine.Start(bigmachine.Local))
-	}
 	log.SetPrefix("")
 	log.AddFlags()
 	log.SetFlags(log.Ldate | log.Ltime)
 
 	runner.Logger = log.Info
-
 	cwd := flag.String("C", "", "Enter the given directory")
 	databaseConfig := flag.String("db", "dynamodb,diviner-patchcnn", "database table where state is stored")
 	flag.Usage = usage
@@ -318,6 +306,9 @@ func main() {
 	if flag.NArg() == 0 {
 		flag.Usage()
 	}
+
+	bigmachine.Init()
+
 	if *cwd != "" {
 		if err := os.Chdir(*cwd); err != nil {
 			log.Fatal(err)

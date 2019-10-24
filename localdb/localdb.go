@@ -52,6 +52,11 @@ func Open(filename string) (db *DB, err error) {
 	})
 }
 
+// CreateTable is a no-op.
+func (*DB) CreateTable(_ context.Context) error {
+	return nil
+}
+
 func (d *DB) CreateStudyIfNotExist(ctx context.Context, study diviner.Study) (created bool, err error) {
 	err = d.db.Update(func(tx *bolt.Tx) (e error) {
 		var b *bolt.Bucket

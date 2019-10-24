@@ -112,6 +112,9 @@ var ErrNotExist = errors.New("study or run does not exist")
 
 // A Database is used to track and manage studies and runs.
 type Database interface {
+	// CreateTable creates the underlying database table.
+	CreateTable(context.Context) error
+
 	// CreateStudyIfNotExist creates a new study from the provided Study value.
 	// If the study already exists, this is a no-op.
 	CreateStudyIfNotExist(ctx context.Context, study Study) (created bool, err error)

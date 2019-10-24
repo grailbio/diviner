@@ -153,6 +153,9 @@
 // 		re-runs them.
 //	diviner logs [-f] [-since=time] run
 //		Write the logs for the given run to standard output.
+//	diviner [-db type,name] create-table
+//		Create the underlying database table required for storing
+//		Diviner studies and runs.
 //
 // diviner list [-runs] studies... lists the studies matching the regular
 // expressions given. If -runs is specified then the study's runs are
@@ -204,6 +207,11 @@
 // diviner logs [-f] run writes logs from the named run to standard
 // output. If -f is given, the log is followed and updates are written
 // as they appear.
+//
+// diviner [-db type,name] create-table creates the underlying
+// database table of the provided type and name (default
+// dynamodb,diviner). This is a one-time setup operation required
+// before using the table.
 //
 // [1] https://www.kdd.org/kdd2017/papers/view/google-vizier-a-service-for-black-box-optimization
 // [2] https://docs.bazel.build/versions/master/skylark/language.html
@@ -276,6 +284,9 @@ func usage() {
 		including its datasets.
 	diviner logs [-f] run
 		Write the logs for the given run to standard output.
+	diviner [-db type,name] create-table
+		Create the underlying database table required for storing
+		Diviner studies and runs.
 
 Whenever studies are named in commands, they are interpreted as
 anchored regular expressions. Thus a given study name without any
@@ -350,6 +361,10 @@ func main() {
 		leaderboard(database, args)
 	case "logs":
 		logs(database, args)
+	case "create-table":
+		if err := database.CreateTable(context.Background()); err != nil {
+			log.Fatal(err)
+		}
 	default:
 		flag.Usage()
 	}

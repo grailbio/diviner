@@ -292,6 +292,8 @@ var httpaddr = flag.String("http", ":6000", "http status address")
 
 var traverser = traverse.Limit(400)
 
+var defaultDB = "dynamodb,diviner"
+
 func main() {
 	initS3()
 	log.SetPrefix("")
@@ -300,7 +302,7 @@ func main() {
 
 	runner.Logger = log.Info
 	cwd := flag.String("C", "", "Enter the given directory")
-	databaseConfig := flag.String("db", "dynamodb,diviner-patchcnn", "database table where state is stored")
+	databaseConfig := flag.String("db", defaultDB, "database table where state is stored")
 	flag.Usage = usage
 	flag.Parse()
 	if flag.NArg() == 0 {

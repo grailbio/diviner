@@ -1,0 +1,39 @@
+
+ec2gpu = ec2system(
+    "ec2gpu",
+    region="us-west-2",
+    ami="ami-01a4e5be5f289dd12",
+    # instance_profile="OPTIONAL_INSTANCE_PROFILE",
+    security_group="SECURITY_GROUP",
+    instance_type="p3.2xlarge",
+    disk_space=100,
+    data_space=500,
+    on_demand=True,
+    flavor="ubuntu")
+
+def run_mnist(params):
+    return run_config(
+        system=ec2gpu,
+        script="""
+nvidia-docker run -i pytorch/pytorch bash -x <<EOF
+git clone https://github.com/pytorch/examples.git
+python examples/mnist/main.py \
+	--batch-size %(batch_size)d \
+	--lr %(learning_rate)f \
+	--epochs %(epochs)d  2>&1 | \
+	awk '/^Test set:/ {gsub(",", "", \$5); print "METRICS: loss="\$5} {print}'
+EOF
+""" % params)
+
+study(
+    name="mnist",
+    params={
+        "epochs": discrete(1, 10, 50, 100),
+        "batch_size": discrete(32, 64, 128, 256),
+        "learning_rate": discrete(0.001, 0.01, 0.1, 1.0),
+    },
+    objective=minimize("loss"),
+    oracle=grid_search,
+    run=run_mnist,
+)
+
